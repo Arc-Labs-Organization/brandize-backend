@@ -36,6 +36,73 @@ function buildGeneratedImagePath(uid, imageId, ext) {
 	return `images/generated/${uid}/${imageId}.${ext}`;
 }
 
+// User accounting helpers
+async function ensureUserExists(uid) {
+	if (!uid || typeof uid !== "string") {
+		throw new Error("Invalid uid provided");
+	}
+
+	const userRef = db.collection("users").doc(uid);
+	const userDoc = await userRef.get();
+
+	if (!userDoc.exists) {
+		// Create user with default values
+		await userRef.set({
+			remainingUsage: {
+				download: 10, // default download limit
+				generate: 5   // default generate limit
+			},
+			brand: {
+				name: null,
+				website: null
+			},
+			createdAt: FieldValue.serverTimestamp(),
+			lastUsedAt: FieldValue.serverTimestamp()
+		});
+	} else {
+		// Update lastUsedAt timestamp
+		await userRef.update({
+			lastUsedAt: FieldValue.serverTimestamp()
+		});
+	}
+}
+
+async function decrementUsage(uid, usageType) {
+	if (!uid || typeof uid !== "string") {
+		throw new Error("Invalid uid provided");
+	}
+	if (usageType !== "download" && usageType !== "generate") {
+		throw new Error("Invalid usage type. Must be 'download' or 'generate'");
+	}
+
+	const userRef = db.collection("users").doc(uid);
+	
+	// Use a transaction to ensure atomic decrement and validation
+	return await db.runTransaction(async (transaction) => {
+		const userDoc = await transaction.get(userRef);
+		
+		if (!userDoc.exists) {
+			throw new Error("User does not exist. Call ensureUserExists first.");
+		}
+
+		const userData = userDoc.data();
+		const remainingUsage = userData.remainingUsage || {};
+		const currentUsage = remainingUsage[usageType] || 0;
+
+		if (currentUsage <= 0) {
+			throw new Error(`No remaining ${usageType} usage available`);
+		}
+
+		// Decrement the usage
+		transaction.update(userRef, {
+			[`remainingUsage.${usageType}`]: FieldValue.increment(-1),
+			lastUsedAt: FieldValue.serverTimestamp()
+		});
+
+		return currentUsage - 1; // return new value
+	});
+}
+
 // Define secret for Google AI Studio API key (Gemini API)
 const GOOGLE_API_KEY = defineSecret("GOOGLE_API_KEY");
 const FREEPIK_API_KEY = defineSecret("FREEPIK_API_KEY");
@@ -215,6 +282,10 @@ exports.freepikDownload = onRequest(
 			}
 
 			try {
+				// Ensure user exists and decrement download usage
+				await ensureUserExists(uid);
+				await decrementUsage(uid, "download");
+
 				const apiUrl = new URL(`https://api.freepik.com/v1/resources/${encodeURIComponent(resourceId)}/download`);
 				if (typeof req.query.variant !== "undefined" && req.query.variant !== null) apiUrl.searchParams.set("variant", req.query.variant.toString());
 				if (typeof req.query.filetype !== "undefined" && req.query.filetype !== null) apiUrl.searchParams.set("filetype", req.query.filetype.toString());
@@ -456,6 +527,10 @@ const getFlows = (() => {
 					}),
 				},
 					async ({ prompt, style, aspectRatio, mockupImageUrl, templateId, cropRect, uid }) => {
+					// Ensure user exists and decrement generate usage
+					await ensureUserExists(uid);
+					await decrementUsage(uid, "generate");
+
 					const stylePrefix = style ? `Style: ${style}. ` : "";
 					const fullPrompt = `${stylePrefix}${prompt}`.trim();
 
