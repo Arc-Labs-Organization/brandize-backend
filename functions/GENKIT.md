@@ -79,3 +79,38 @@ curl -X POST \
 ```
 
 If your secret is set and emulators are running, you should receive `{ imageBase64, mimeType, modelVersion }`.
+
+## Image Storage & Firestore Schema (Updated)
+
+The backend now uses a unified, non-duplicating image schema:
+
+Storage Paths:
+- `images/common/{imageId}.<ext>` – Cached shared template images (Freepik downloads). `imageId` equals Freepik `resourceId` for stability.
+- `images/generated/{uid}/{imageId}.<ext>` – User generated images.
+
+Firestore:
+- `images/{imageId}` – Master document for any image (downloaded or generated).
+  - Fields: `storagePath`, `type: 'downloaded' | 'generated'`, `ownerId` (null for downloaded), `createdAt`, plus optional metadata (`resourceId`, `mimeType`, `size`, `prompt`, `style`, etc.).
+- `users/{uid}/downloads/{imageId}` – Link document referencing a shared template (no duplication of the file).
+- `users/{uid}/generated/{imageId}` – Link document referencing a user-generated image.
+
+Download Flow:
+1. User calls `freepikDownload?resourceId=...&uid=...`.
+2. If not cached: fetch ZIP, extract first image file, store to `images/common/{resourceId}.<ext>`, create master `images/{resourceId}` doc.
+3. Create/merge user link `users/{uid}/downloads/{resourceId}`.
+4. Return `{ imageId, storagePath, downloadUrl }`.
+
+Generation Flow:
+1. User calls `generateImageV2` with body including `uid`.
+2. Model generates image; stored at `images/generated/{uid}/{uuid}.<ext>`.
+3. Create master doc `images/{uuid}` with `type='generated'` and metadata.
+4. Create user link `users/{uid}/generated/{uuid}`.
+5. Return `{ id, storagePath, downloadUrl, imageBase64 }`.
+
+Rationale:
+- Prevents storage duplication for downloaded templates.
+- Allows per-user relations without copying large binaries.
+- Enables querying master image metadata centrally.
+
+Migration (legacy):
+If you previously stored templates under `templates/` and docs in `freepikDownloads`, run a one-off script to copy metadata into the new `images` collection and optionally move files to `images/common/`. (See `functions/scripts/migrateExistingImages.js` example stub).

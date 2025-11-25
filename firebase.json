@@ -32,13 +32,6 @@
 							"functionId": "freepikSearch",
 							"region": "europe-west1"
 						}
-					},
-					{
-						"source": "/api/hello",
-						"function": {
-							"functionId": "genkitHello",
-							"region": "europe-west1"
-						}
 					}
 		]
 	}
