@@ -487,6 +487,7 @@ const getFlows = (() => {
 				// Default model here is optional; we set it explicitly in generate() below
 			});
 
+
 			const allowedRatios = ["1:1", "16:9", "9:16", "3:2", "2:3", "4:3", "3:4", "5:4", "4:5", "21:9"];
 
 				const generateImageFlow = flow(
@@ -510,12 +511,11 @@ const getFlows = (() => {
 							uid: z.string().min(1),
 					}),
 					outputSchema: z.object({
-						imageBase64: z.string(),
 						mimeType: z.string(),
 						modelVersion: z.string().optional(),
-						id: z.string().optional(),
-						storagePath: z.string().optional(),
-						downloadUrl: z.string().nullable().optional(),
+						id: z.string(),
+						storagePath: z.string(),
+						downloadUrl: z.string().optional().nullable(),
 					}),
 				},
 					async ({ prompt, style, aspectRatio, mockupImageUrl, logoUrl, templateId, cropRect, uid }) => {
@@ -655,16 +655,18 @@ const getFlows = (() => {
 					const bucket = bucketName ? admin.storage().bucket(bucketName) : admin.storage().bucket();
 					
 					let file = null;
+					let downloadToken = null;
 					try {
 						const [bucketExists] = await bucket.exists();
 						if (!bucketExists) {
 							console.warn(`Storage bucket not found. Skipping storage write. Attempted bucket: ${bucketName || "(default)"} `);
 						} else {
 							file = bucket.file(imagePath);
+							downloadToken = randomUUID();
 							await file.save(buffer, {
 								resumable: false,
 								contentType: mimeType,
-								metadata: { cacheControl: "public, max-age=31536000" },
+								metadata: { cacheControl: "public, max-age=31536000", metadata: { firebaseStorageDownloadTokens: downloadToken } },
 							});
 						}
 					} catch (storageErr) {
@@ -672,19 +674,31 @@ const getFlows = (() => {
 						file = null;
 					}
 
-					// Optionally create a signed URL (1 year)
+					// Create a usable download URL when Storage write succeeds
 					let downloadUrl = null;
 					if (file) {
 						try {
-							// Use a Date object for signed URL expiry to avoid format issues
 							const [url] = await file.getSignedUrl({ action: "read", expires: new Date(Date.now() + 1000 * 60 * 60 * 24 * 365) });
 							downloadUrl = url;
 						} catch (e) {
-							// If signed URL fails, continue without it and log the error for diagnostics.
 							console.warn("getSignedUrl failed:", e?.message || e);
+							// Try to read or set legacy download token, then build token URL
+							try {
+								const [metadata] = await file.getMetadata().catch(() => [{}]);
+								let token = metadata?.metadata?.firebaseStorageDownloadTokens;
+								if (!token) {
+									token = downloadToken || randomUUID();
+									await file.setMetadata({ metadata: { firebaseStorageDownloadTokens: token } }).catch(() => {});
+								}
+								downloadUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(imagePath)}?alt=media&token=${token}`;
+							} catch (tokErr) {
+								console.warn("Token URL fallback failed, using public media URL:", tokErr?.message || tokErr);
+								downloadUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(imagePath)}?alt=media`;
+							}
 						}
 					} else {
-						console.warn("Skipping getSignedUrl because file was not written to Storage");
+						console.warn("Skipping URL generation because file was not written to Storage");
+						downloadUrl = null;
 					}
 
 					// Attempt to write Firestore metadata, but don't fail the whole request if Firestore isn't set up
@@ -718,7 +732,7 @@ const getFlows = (() => {
 						console.warn("Firestore metadata write skipped:", metaErr?.message || metaErr);
 					}
 
-					return { imageBase64, mimeType, modelVersion: rawResponse?.modelVersion, id, storagePath: imagePath, downloadUrl };
+					return { mimeType, modelVersion: rawResponse?.modelVersion, id, storagePath: imagePath, downloadUrl };
 				}
 			);
 
