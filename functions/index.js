@@ -49,8 +49,8 @@ async function ensureUserExists(uid) {
 		// Create user with default values
 		await userRef.set({
 			remainingUsage: {
-				download: 10, // default download limit
-				generate: 5   // default generate limit
+				download: 100, // default download limit
+				generate: 100   // default generate limit
 			},
 			brand: {
 				name: null,
@@ -427,7 +427,7 @@ exports.generateImageV2 = onRequest(
 				return res.status(405).json({ error: "Method not allowed. Use POST." });
 			}
 
-			const { prompt, style, aspectRatio, mockupImageUrl } = req.body || {};
+				const { prompt, style, aspectRatio, mockupImageUrl, logoUrl } = req.body || {};
 			if (!prompt || typeof prompt !== "string") {
 				return res.status(400).json({ error: "Missing required field: prompt (string)." });
 			}
@@ -435,7 +435,7 @@ exports.generateImageV2 = onRequest(
 			try {
 				const { generateImageFlow } = await getFlows();
 				const uid = (req.body && req.body.uid) || "";
-				const result = await generateImageFlow({ prompt, style, aspectRatio, mockupImageUrl, uid });
+					const result = await generateImageFlow({ prompt, style, aspectRatio, mockupImageUrl, logoUrl, uid });
 				return res.status(200).json(result);
 			} catch (err) {
 				// Validation errors from zod should be treated as 400
@@ -506,6 +506,7 @@ const getFlows = (() => {
 							style: z.string().optional(),
 							aspectRatio: z.enum(allowedRatios).optional(),
 							mockupImageUrl: z.string().url().optional(),
+							logoUrl: z.string().url().optional(),
 							templateId: z.string().optional(), // freepikDownload'tan gelen uuid
 							cropRect: z
 							 .object({
@@ -526,7 +527,7 @@ const getFlows = (() => {
 						downloadUrl: z.string().nullable().optional(),
 					}),
 				},
-					async ({ prompt, style, aspectRatio, mockupImageUrl, templateId, cropRect, uid }) => {
+					async ({ prompt, style, aspectRatio, mockupImageUrl, logoUrl, templateId, cropRect, uid }) => {
 					// Ensure user exists and decrement generate usage
 					await ensureUserExists(uid);
 					await decrementUsage(uid, "generate");
@@ -536,7 +537,8 @@ const getFlows = (() => {
 
 					// Best-effort: If a mockup image URL is provided, try to fetch it and include as multimodal input.
 					// If anything fails, we fallback to text-only generation.
-					let imageInput = null;
+						let imageInput = null;
+						let logoInput = null;
 					if (mockupImageUrl) {
 						try {
 							const r = await fetch(mockupImageUrl);
@@ -549,32 +551,80 @@ const getFlows = (() => {
 						}
 					}
 
+						// Best-effort: Optional logo image as a second media input
+						if (logoUrl) {
+							try {
+								const r = await fetch(logoUrl);
+								const mimeType = r.headers.get("content-type") || "image/jpeg";
+								const buffer = Buffer.from(await r.arrayBuffer());
+								const base64 = buffer.toString("base64");
+								logoInput = { mimeType, base64 };
+							} catch (e) {
+								console.warn("Failed to fetch logo image, proceeding without it:", e?.message || e);
+							}
+						}
+
 					// Use Genkit to generate an image with Gemini 2.5 Flash Image
-					let media, rawResponse;
-					if (imageInput) {
-						// Use Gemini image model for image+text editing with a reference image.
-						const dataUrl = `data:${imageInput.mimeType};base64,${imageInput.base64}`;
-						const enhancedPrompt = `Based on the provided reference image, ${fullPrompt}. Keep the composition and style similar to the reference image.`;
-						({ media, rawResponse } = await ai.generate({
-							model: googleAI.model("gemini-2.5-flash-image"),
-							prompt: [{ media: { contentType: imageInput.mimeType, url: dataUrl } }, { text: enhancedPrompt }],
-							config: {
-								responseModalities: ["IMAGE"],
-								...(aspectRatio ? { imageConfig: { aspectRatio } } : {}),
-							},
-							output: { format: "media" },
-						}));
-					} else {
-						({ media, rawResponse } = await ai.generate({
-							model: googleAI.model("gemini-2.5-flash-image"),
-							prompt: fullPrompt,
-							config: {
-								responseModalities: ["IMAGE"],
-								...(aspectRatio ? { imageConfig: { aspectRatio } } : {}),
-							},
-							output: { format: "media" },
-						}));
-					}
+						let media, rawResponse;
+						if (imageInput || logoInput) {
+							const promptArray = [];
+							if (imageInput) {
+								const dataUrl = `data:${imageInput.mimeType};base64,${imageInput.base64}`;
+								promptArray.push({ media: { contentType: imageInput.mimeType, url: dataUrl } });
+							}
+							if (logoInput) {
+								const logoDataUrl = `data:${logoInput.mimeType};base64,${logoInput.base64}`;
+								promptArray.push({ media: { contentType: logoInput.mimeType, url: logoDataUrl } });
+							}
+							const enhancedPrompt = `Based on the provided reference image, ${fullPrompt}. Keep the composition and style similar to the reference image.`;
+							promptArray.push({ text: enhancedPrompt });
+
+							try {
+								({ media, rawResponse } = await ai.generate({
+									model: googleAI.model("gemini-3-pro-image-preview"),
+									prompt: promptArray,
+									config: {
+										responseModalities: ["IMAGE"],
+										...(aspectRatio ? { imageConfig: { aspectRatio } } : {}),
+									},
+									output: { format: "media" },
+								}));
+							} catch (primaryErr) {
+								console.warn("Primary model failed, falling back to gemini-2.5-flash-image:", primaryErr?.message || primaryErr);
+								({ media, rawResponse } = await ai.generate({
+									model: googleAI.model("gemini-2.5-flash-image"),
+									prompt: promptArray,
+									config: {
+										responseModalities: ["IMAGE"],
+										...(aspectRatio ? { imageConfig: { aspectRatio } } : {}),
+									},
+									output: { format: "media" },
+								}));
+							}
+						} else {
+								try {
+									({ media, rawResponse } = await ai.generate({
+										model: googleAI.model("gemini-3-pro-image-preview"),
+										prompt: fullPrompt,
+										config: {
+											responseModalities: ["IMAGE"],
+											...(aspectRatio ? { imageConfig: { aspectRatio } } : {}),
+										},
+										output: { format: "media" },
+									}));
+								} catch (primaryErr) {
+									console.warn("Primary model failed, falling back to gemini-2.5-flash-image:", primaryErr?.message || primaryErr);
+									({ media, rawResponse } = await ai.generate({
+										model: googleAI.model("gemini-2.5-flash-image"),
+										prompt: fullPrompt,
+										config: {
+											responseModalities: ["IMAGE"],
+											...(aspectRatio ? { imageConfig: { aspectRatio } } : {}),
+										},
+										output: { format: "media" },
+									}));
+								}
+						}
 
 					// Genkit may return media as an array or a single object. Normalize it.
 					const m = Array.isArray(media) ? media[0] : media;
