@@ -422,30 +422,34 @@ exports.generateImageV2 = onRequest(
 			return res.status(204).send("");
 		}
 
-		return cors(req, res, async () => {
-			if (req.method !== "POST") {
-				return res.status(405).json({ error: "Method not allowed. Use POST." });
-			}
+            return cors(req, res, async () => {
+            if (req.method !== "POST") {
+                return res.status(405).json({ error: "Method not allowed. Use POST." });
+            }
 
-				const { prompt, style, aspectRatio, mockupImageUrl, logoUrl } = req.body || {};
-			if (!prompt || typeof prompt !== "string") {
-				return res.status(400).json({ error: "Missing required field: prompt (string)." });
-			}
+            const { prompt, style, aspectRatio, mockupImageUrl, logoUrl, uid, templateId, cropRect } = req.body || {};
 
-			try {
-				const { generateImageFlow } = await getFlows();
-				const uid = (req.body && req.body.uid) || "";
-					const result = await generateImageFlow({ prompt, style, aspectRatio, mockupImageUrl, logoUrl, uid });
-				return res.status(200).json(result);
-			} catch (err) {
-				// Validation errors from zod should be treated as 400
-				if (err && (err.name === "ZodError" || err.issues)) {
-					return res.status(400).json({ error: "Invalid input", details: err.issues || String(err) });
-				}
-				console.error("generateImage error:", err);
-				return res.status(500).json({ error: "Internal error generating image", details: String((err && err.message) || err) });
-			}
-		});
+            if (!prompt || typeof prompt !== "string") {
+                return res.status(400).json({ error: "Missing required field: prompt (string)." });
+            }
+
+            if (!uid || typeof uid !== "string") {
+                return res.status(400).json({ error: "Missing required field: uid (string)." });
+            }
+
+            try {
+                const { generateImageFlow } = await getFlows();
+                const result = await generateImageFlow({ prompt, style, aspectRatio, mockupImageUrl, logoUrl, uid, templateId, cropRect });
+                return res.status(200).json(result);
+
+            } catch (err) {
+                if (err && (err.name === "ZodError" || err.issues)) {
+                    return res.status(400).json({ error: "Invalid input", details: err.issues || String(err) });
+                }
+                console.error("generateImage error:", err);
+                return res.status(500).json({ error: "Internal error generating image", details: String(err.message || err) });
+            }
+        });
 	}
 );
 
@@ -499,15 +503,15 @@ const getFlows = (() => {
 							aspectRatio: z.enum(allowedRatios).optional(),
 							mockupImageUrl: z.string().url().optional(),
 							logoUrl: z.string().url().optional(),
-							templateId: z.string().optional(), // freepikDownload'tan gelen uuid
-							cropRect: z
-							 .object({
-								x: z.number(),
-								y: z.number(),
-								width: z.number(),
-								height: z.number(),
-								})
-								.optional(), // varsa crop bilgisi
+							//templateId: z.string().optional(), // freepikDownload'tan gelen uuid
+							// cropRect: z
+							//  .object({
+							// 	x: z.number(),
+							// 	y: z.number(),
+							// 	width: z.number(),
+							// 	height: z.number(),
+							// 	})
+							// 	.optional(), // varsa crop bilgisi
 							uid: z.string().min(1),
 					}),
 					outputSchema: z.object({
@@ -518,7 +522,7 @@ const getFlows = (() => {
 						downloadUrl: z.string().optional().nullable(),
 					}),
 				},
-					async ({ prompt, style, aspectRatio, mockupImageUrl, logoUrl, templateId, cropRect, uid }) => {
+					async ({ prompt, style, aspectRatio, mockupImageUrl, logoUrl, uid }) => {
 					// Ensure user exists and decrement generate usage
 					await ensureUserExists(uid);
 					await decrementUsage(uid, "generate");
@@ -717,8 +721,8 @@ const getFlows = (() => {
 							downloadUrl,
 							modelVersion: rawResponse?.modelVersion || null,
 							size: buffer.length,
-							templateId: templateId || null,
-							cropRect: cropRect || null
+							//templateId: templateId || null,
+							//cropRect: cropRect || null
 						});
 						if (ownerId) {
 							await db.collection("users").doc(ownerId).collection("generated").doc(id).set({
