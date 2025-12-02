@@ -487,15 +487,6 @@ const getFlows = (() => {
 				// Default model here is optional; we set it explicitly in generate() below
 			});
 
-			const helloFlow = flow(
-				{
-					name: "hello",
-					inputSchema: z.object({ name: z.string() }),
-					outputSchema: z.object({ message: z.string() }),
-				},
-				async (input) => ({ message: `Hello, ${input.name}! Genkit is ready.` })
-			);
-
 			const allowedRatios = ["1:1", "16:9", "9:16", "3:2", "2:3", "4:3", "3:4", "5:4", "4:5", "21:9"];
 
 				const generateImageFlow = flow(
@@ -731,7 +722,7 @@ const getFlows = (() => {
 				}
 			);
 
-			return { helloFlow, generateImageFlow };
+			return { generateImageFlow };
 		})();
 		return bootPromise;
 	};
