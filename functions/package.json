@@ -12,7 +12,6 @@
 		"start": "npm run serve"
 	},
 	"dependencies": {
-		"@anthropic-ai/sdk": "^0.23.0",
 		"@genkit-ai/core": "^1.22.0",
 		"@genkit-ai/firebase": "^1.22.0",
 		"@genkit-ai/googleai": "^1.22.0",

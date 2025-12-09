@@ -109,7 +109,7 @@ async function decrementUsage(uid, usageType) {
 // - Emulator: provide in `.env.local` or `.env` under functions/
 const GOOGLE_API_KEY = defineSecret('GOOGLE_API_KEY');
 const FREEPIK_API_KEY = defineSecret('FREEPIK_API_KEY');
-const ANTHROPIC_API_KEY = defineSecret('ANTHROPIC_API_KEY');
+// Anthropic no longer used; key removed
 
 /**
  * Proxy search to Freepik API to keep API key server-side.
@@ -467,7 +467,7 @@ exports.generateImageV2 = onRequest(
     timeoutSeconds: 120,
     memory: '1GiB',
     cors: true,
-    secrets: [GOOGLE_API_KEY, ANTHROPIC_API_KEY],
+    secrets: [GOOGLE_API_KEY],
   },
   async (req, res) => {
     // Handle CORS preflight explicitly for some clients
@@ -543,13 +543,12 @@ const getFlows = (() => {
     if (bootPromise) return bootPromise;
     bootPromise = (async () => {
       // Dynamically import Genkit core, Google AI plugin, Firebase telemetry, and Zod
-      const [core, genkitPkg, googleAIPkg, firebasePkg, zodPkg, anthropicPkg] = await Promise.all([
+      const [core, genkitPkg, googleAIPkg, firebasePkg, zodPkg] = await Promise.all([
         import('@genkit-ai/core'),
         import('genkit'),
         import('@genkit-ai/googleai'),
         import('@genkit-ai/firebase'),
         import('zod'),
-        import('@anthropic-ai/sdk').catch(() => ({ default: null })),
       ]);
 
       const { flow } = core;
@@ -557,7 +556,6 @@ const getFlows = (() => {
       const { googleAI } = googleAIPkg;
       const { enableFirebaseTelemetry } = firebasePkg;
       const { z } = zodPkg;
-      const Anthropic = anthropicPkg?.default;
 
       // Sanity log to surface missing API key during cold starts/emulator runs
       console.log('GOOGLE_API_KEY set?', !!process.env.GOOGLE_API_KEY);
@@ -576,23 +574,7 @@ const getFlows = (() => {
         // Default model here is optional; we set it explicitly in generate() below
       });
 
-      // Optional: Initialize Claude client when SDK is available
-      let anthropicClient = null;
-      try {
-        console.log('[ClaudeInit] Anthropic import present?', !!Anthropic);
-        console.log('[ClaudeInit] ANTHROPIC_API_KEY env present?', !!process.env.ANTHROPIC_API_KEY);
-
-        if (Anthropic && process.env.ANTHROPIC_API_KEY) {
-          anthropicClient = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-          console.log('[ClaudeInit] anthropicClient created?', !!anthropicClient);
-        } else {
-          console.warn(
-            '[ClaudeInit] Anthropic SDK or ANTHROPIC_API_KEY missing – Claude disabled.',
-          );
-        }
-      } catch (e) {
-        console.warn('[ClaudeInit] Failed to init Claude client:', e?.message || e);
-      }
+      // Anthropic client initialization removed (Gemini-only setup)
 
       const allowedRatios = [
         '1:1',
@@ -607,7 +589,7 @@ const getFlows = (() => {
         '21:9',
       ];
 
-      // Helper: Build a rebranding blueprint from Claude result + brand
+      // Helper: Build a rebranding blueprint from gemini result + brand
       // Blueprint is a suggested plan the caller can override before image generation.
       // All values in text_updates are defaults/suggestions and can be changed by the client.
       function buildRebrandBlueprint({
@@ -703,27 +685,27 @@ const getFlows = (() => {
             const parts = [];
             parts.push('Update the design per the following blueprint suggestions.');
             if (bp.use_brand_colors)
-              parts.push('Apply brand colors consistently across text and accents.');
+              parts.push('Apply the brand colors consistently to key elements (backgrounds, buttons, highlights) ' + 'but keep the overall contrast and readability high.');
             if (bp.replace_logo)
               parts.push(
-                'Replace any existing logo with the provided brand logo, aligning placement and size.',
+                    'If there is an existing logo, replace it with the provided brand logo. ' + 'Keep the approximate size and position similar to the original logo placement.',
               );
             // Text updates
             const keys = Object.keys(textOps);
             if (keys.length) {
-              parts.push('Text replacements/removals:');
+              parts.push('TEXT RULES: Only modify the texts explicitly listed below. ' + 'Do NOT change any other text in the design.');
               for (const k of keys) {
                 const v = textOps[k];
                 if (v === null || typeof v === 'undefined') {
                   parts.push(`- Remove text: "${k}"`);
                 } else {
-                  parts.push(`- Replace "${k}" with "${v}"`);
+                  parts.push(`- Replace "${k}" with "${v}" while preserving the approximate font size, ` + 'weight, and position.');
                 }
               }
             }
             // Additions
             if (additions.length) {
-              parts.push('Add elements as specified:');
+              parts.push('ADDITIONS: Add only the following elements. Do NOT invent other new elements: ');
               for (const add of additions) {
                 parts.push(`- Add ${add.type} at ${add.location}`);
               }
@@ -732,6 +714,9 @@ const getFlows = (() => {
             if (bp.aspect_ratio && allowedRatios.includes(bp.aspect_ratio)) {
               aspectRatio = bp.aspect_ratio;
             }
+
+            parts.push('GENERAL RULES: Preserve the overall layout, composition, and visual hierarchy of the original design. ' + 'Do not remove or drastically move major visual elements unless explicitly requested.');
+
             fullPrompt = parts.join(' \n');
           } else {
             const stylePrefix = style ? `Style: ${style}. ` : '';
@@ -996,12 +981,7 @@ const getFlows = (() => {
           }),
         },
         async ({ brand, imageUrl, imageBase64 }) => {
-          console.log('[updateImageTextsForBrand] anthropicClient?', !!anthropicClient);
-          if (!anthropicClient) {
-            throw new Error(
-              'Claude provider not available. Install @anthropic-ai/sdk and set ANTHROPIC_API_KEY.',
-            );
-          }
+          console.log('[updateImageTextsForBrand] Using Gemini for extraction');
 
           const brandJson = JSON.stringify(brand, null, 2);
           const promptText = [
@@ -1018,6 +998,7 @@ const getFlows = (() => {
             '',
             '{\n  "original_texts": [\n    "..."\n  ],\n  "updated_texts": [\n    "..."\n  ],\n  "replacable_logo": true\n}',
           ].join('\n');
+          console.log(brandJson);
 
           // Prepare image media in Genkit prompt format
           const mediaParts = [];
@@ -1026,7 +1007,7 @@ const getFlows = (() => {
               media: { contentType: 'image/jpeg', url: `data:image/jpeg;base64,${imageBase64}` },
             });
           } else if (imageUrl) {
-            // Fetch and convert to data URL to ensure Claude receives the image
+            // Fetch and convert to data URL to ensure Gemini receives the image
             try {
               const r = await fetch(imageUrl);
               const mimeType = r.headers.get('content-type') || 'image/jpeg';
@@ -1041,59 +1022,22 @@ const getFlows = (() => {
             }
           }
 
-          // Genkit yerine direkt Anthropic SDK kullan
-          const content = [];
+          // Build Genkit prompt for Gemini (media + instruction)
+          const promptArray = [...mediaParts, { text: promptText }];
 
-          // mediaParts → Anthropic formatına çevir
-          for (const part of mediaParts) {
-            const media = part && part.media;
-            if (!media || !media.url || !media.contentType) continue;
-            const { url, contentType } = media;
-
-            if (url.startsWith('data:')) {
-              const commaIdx = url.indexOf(',');
-              const base64 = commaIdx >= 0 ? url.substring(commaIdx + 1) : '';
-              let media_type = (contentType || 'image/jpeg').split(';')[0].trim();
-              if (media_type === 'image/jpg') media_type = 'image/jpeg';
-              const allowedTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
-              if (!allowedTypes.includes(media_type)) media_type = 'image/jpeg';
-              content.push({
-                type: 'image',
-                source: { type: 'base64', media_type, data: base64 },
-              });
-            } else {
-              content.push({ type: 'image', source: { type: 'url', url } });
-            }
-          }
-
-          // Text instruction
-          content.push({ type: 'text', text: promptText });
-
-          console.log('[updateImageTextsForBrand] Calling Claude with', {
-            images: content.filter((c) => c.type === 'image').length,
+          console.log('[updateImageTextsForBrand] Calling Gemini with', {
+            images: mediaParts.length,
           });
 
-          const resp = await anthropicClient.messages.create({
-            model: 'claude-sonnet-4-5-20250929',
-            max_tokens: 2048,
-            temperature: 0,
-            system: 'Return ONLY strict JSON. No commentary, no code fences.',
-            messages: [
-              {
-                role: 'user',
-                content,
-              },
-            ],
+          const { text } = await ai.generate({
+            model: googleAI.model('gemini-2.5-flash'),
+            prompt: promptArray,
+            output: { format: 'text' },
+            config: { temperature: 0 },
           });
-
-          // Claude cevabındaki text’i al
-          const text =
-            resp?.content?.[0]?.type === 'text'
-              ? resp.content[0].text
-              : resp?.content?.find((c) => c.type === 'text')?.text || '';
 
           // Log raw text for debugging
-          console.log('[updateImageTextsForBrand] Claude raw text:', text);
+          console.log('[updateImageTextsForBrand] Gemini raw text:', text);
 
           let json;
           try {
@@ -1118,7 +1062,7 @@ const getFlows = (() => {
             console.error('[updateImageTextsForBrand] JSON parse failed:', e?.message || e);
             console.error('[updateImageTextsForBrand] Raw text:', text);
             console.error('[updateImageTextsForBrand] Cleaned text:', (text || '').trim());
-            throw new Error('Claude returned non-JSON output');
+            throw new Error('Gemini returned non-JSON output');
           }
           const parsed = z
             .object({
@@ -1144,7 +1088,7 @@ exports.updateImageTextsForBrand = onRequest(
     timeoutSeconds: 60,
     memory: '256MiB',
     cors: true,
-    secrets: [ANTHROPIC_API_KEY, GOOGLE_API_KEY, FREEPIK_API_KEY], // <-- ekle
+    secrets: [GOOGLE_API_KEY, FREEPIK_API_KEY],
   },
   async (req, res) => {
     if (req.method === 'OPTIONS') {
@@ -1192,6 +1136,183 @@ exports.updateImageTextsForBrand = onRequest(
         return res
           .status(500)
           .json({ error: 'Internal error', details: String(err?.message || err) });
+      }
+    });
+  },
+);
+
+/**
+ * Brand management endpoints: addBrand, updateBrand, deleteBrand
+ * Firestore path: /users/{userId}/brands/{brandId}
+ * Storage logo path convention: images/brands/{userId}/{brandId}/logo.png
+ */
+exports.addBrand = onRequest(
+  {
+    region: 'europe-west1',
+    timeoutSeconds: 30,
+    memory: '256MiB',
+    cors: true,
+  },
+  async (req, res) => {
+    // CORS preflight
+    if (req.method === 'OPTIONS') {
+      res.set('Access-Control-Allow-Origin', '*');
+      res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+      res.set('Access-Control-Allow-Headers', 'Content-Type');
+      return res.status(204).send('');
+    }
+
+    return cors(req, res, async () => {
+      if (req.method !== 'POST') {
+        return res.status(405).json({ success: false, error: 'Method not allowed. Use POST.' });
+      }
+
+      try {
+        const { user_id, brandInfo } = req.body || {};
+        if (!user_id || typeof user_id !== 'string') {
+          return res.status(400).json({ success: false, error: 'Missing required field: user_id' });
+        }
+        if (!brandInfo || typeof brandInfo !== 'object') {
+          return res.status(400).json({ success: false, error: 'Missing required field: brandInfo' });
+        }
+        const brandName = (brandInfo.brandName || '').toString().trim();
+        if (!brandName) {
+          return res
+            .status(400)
+            .json({ success: false, error: 'Missing required field: brandInfo.brandName' });
+        }
+
+        const brandsCol = db.collection('users').doc(user_id).collection('brands');
+        const brandRef = brandsCol.doc(); // auto-id
+        const nowFields = {
+          createdAt: FieldValue.serverTimestamp(),
+          updatedAt: FieldValue.serverTimestamp(),
+        };
+        const docData = {
+          brandName,
+          website: brandInfo.website ?? null,
+          phone: brandInfo.phone ?? null,
+          address: brandInfo.address ?? null,
+          description: brandInfo.description ?? null,
+          colorPalette: Array.isArray(brandInfo.colorPalette) ? brandInfo.colorPalette : [],
+          ...nowFields,
+        };
+
+        await brandRef.set(docData);
+        return res.status(200).json({ success: true, brandId: brandRef.id });
+      } catch (err) {
+        console.error('addBrand error:', err);
+        return res
+          .status(500)
+          .json({ success: false, error: 'Internal error creating brand', details: String(err?.message || err) });
+      }
+    });
+  },
+);
+
+exports.updateBrand = onRequest(
+  {
+    region: 'europe-west1',
+    timeoutSeconds: 30,
+    memory: '256MiB',
+    cors: true,
+  },
+  async (req, res) => {
+    if (req.method === 'OPTIONS') {
+      res.set('Access-Control-Allow-Origin', '*');
+      res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+      res.set('Access-Control-Allow-Headers', 'Content-Type');
+      return res.status(204).send('');
+    }
+
+    return cors(req, res, async () => {
+      if (req.method !== 'POST') {
+        return res.status(405).json({ success: false, error: 'Method not allowed. Use POST.' });
+      }
+      try {
+        const { user_id, brand_id, brandInfo } = req.body || {};
+        if (!user_id || typeof user_id !== 'string') {
+          return res.status(400).json({ success: false, error: 'Missing required field: user_id' });
+        }
+        if (!brand_id || typeof brand_id !== 'string') {
+          return res.status(400).json({ success: false, error: 'Missing required field: brand_id' });
+        }
+        if (!brandInfo || typeof brandInfo !== 'object') {
+          return res.status(400).json({ success: false, error: 'Missing required field: brandInfo' });
+        }
+
+        const brandRef = db.collection('users').doc(user_id).collection('brands').doc(brand_id);
+        const existing = await brandRef.get();
+        if (!existing.exists) {
+          return res.status(404).json({ success: false, error: 'Brand not found' });
+        }
+
+        const updatePayload = { ...brandInfo, updatedAt: FieldValue.serverTimestamp() };
+        await brandRef.set(updatePayload, { merge: true });
+        return res.status(200).json({ success: true });
+      } catch (err) {
+        console.error('updateBrand error:', err);
+        return res
+          .status(500)
+          .json({ success: false, error: 'Internal error updating brand', details: String(err?.message || err) });
+      }
+    });
+  },
+);
+
+exports.deleteBrand = onRequest(
+  {
+    region: 'europe-west1',
+    timeoutSeconds: 30,
+    memory: '256MiB',
+    cors: true,
+  },
+  async (req, res) => {
+    if (req.method === 'OPTIONS') {
+      res.set('Access-Control-Allow-Origin', '*');
+      res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+      res.set('Access-Control-Allow-Headers', 'Content-Type');
+      return res.status(204).send('');
+    }
+
+    return cors(req, res, async () => {
+      if (req.method !== 'POST') {
+        return res.status(405).json({ success: false, error: 'Method not allowed. Use POST.' });
+      }
+      try {
+        const { user_id, brand_id } = req.body || {};
+        if (!user_id || typeof user_id !== 'string') {
+          return res.status(400).json({ success: false, error: 'Missing required field: user_id' });
+        }
+        if (!brand_id || typeof brand_id !== 'string') {
+          return res.status(400).json({ success: false, error: 'Missing required field: brand_id' });
+        }
+
+        const brandRef = db.collection('users').doc(user_id).collection('brands').doc(brand_id);
+        const existing = await brandRef.get();
+        if (!existing.exists) {
+          console.warn(`deleteBrand: brand not found for user ${user_id}, id ${brand_id}`);
+        }
+
+        // Attempt Firestore delete regardless
+        await brandRef.delete().catch((e) => {
+          console.warn('deleteBrand Firestore delete error:', e?.message || e);
+        });
+
+        // Attempt to delete logo file at the conventional path; ignore not found
+        const logoPath = `images/brands/${user_id}/${brand_id}/logo.png`;
+        try {
+          await bucket.file(logoPath).delete({ ignoreNotFound: true });
+        } catch (e) {
+          console.warn('deleteBrand logo delete warning:', e?.message || e);
+        }
+
+        return res.status(200).json({ success: true });
+      } catch (err) {
+        console.error('deleteBrand error:', err);
+        return res
+          .status(500)
+          .json({ success: false, error: 'Internal error deleting brand', details: String(err?.message || err) });
       }
     });
   },
