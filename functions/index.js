@@ -965,33 +965,65 @@ const getFlows = (() => {
         },
       );
 
-      // Flow: updateImageTextsForBrand
-      const extractText = flow(
+      // Flow: generateSmartBlueprint
+      const generateSmartBlueprintFlow = flow(
         {
-          name: 'updateImageTextsForBrand',
+          name: 'generateSmartBlueprint',
           inputSchema: z
             .object({
               brand: z.record(z.any()),
-              imageUrl: z.string().url().optional(),
-              imageBase64: z.string().optional(),
-            })
-            .refine((v) => !!v.imageUrl || !!v.imageBase64, {
-              message: 'Provide imageUrl or imageBase64',
+              imageBase64: z.string(),
+              updateFields: z.record(z.boolean()).optional(),
             }),
           outputSchema: z.object({
             original_texts: z.array(z.string()),
-            updated_texts: z.array(z.string()),
+            updated_texts: z.array(z.string().nullable()),
+            additional_texts: z.array(z.record(z.string())),
             replacable_logo: z.boolean(),
           }),
         },
-        async ({ brand, imageUrl, imageBase64 }) => {
-          console.log('[updateImageTextsForBrand] Using Gemini for extraction');
+        async ({ brand, imageBase64, updateFields }) => {
+          console.log('[generateSmartBlueprint] Using Gemini for extraction');
 
-          const brandJson = JSON.stringify(brand, null, 2);
+          // Construct the field values table for the prompt
+          const fieldValues = {};
+          if (updateFields) {
+            for (const [key, enabled] of Object.entries(updateFields)) {
+              if (enabled && brand[key]) {
+                fieldValues[key] = brand[key];
+              } else {
+                fieldValues[key] = null;
+              }
+            }
+          } else {
+            // Default behavior if updateFields is not provided: use all available brand fields
+            // Assuming standard fields: brandName, phone, website, address
+            const standardFields = ['brandName', 'phone', 'website', 'address'];
+            for (const key of standardFields) {
+              fieldValues[key] = brand[key] || null;
+            }
+          }
+
+          const fieldValuesJson = JSON.stringify(fieldValues, null, 2);
           const promptText = [
             'We will update the texts in the provided image so they align with the branding of:',
             '',
-            brandJson,
+            `- **Brand Name:** ${brand.brandName || 'N/A'}`,
+            `- **Description:** ${brand.description || 'N/A'}`,
+            '',
+            'Use the table below to determine which types of text should appear in the updated output:',
+            '',
+            '```json',
+            fieldValuesJson,
+            '```',
+            '',
+            '- **Fields that are `null`** must **not** appear in either **“updated_texts”** or **“additional_texts.”**',
+            '    - If these fields exist in the original image, you should either **replace them with appropriate content** or **remove them entirely**.',
+            '    - If you choose to remove them, set their value to **`null`**.',
+            '- **Fields that have a valid value,** must appear **at least once** in either **“updated_texts”** or **“additional_texts.”**',
+            '    - If you can replace original text with a context-appropriate and similarly sized version, do so in **“updated_texts.”**',
+            '    - If no suitable replacement exists, add the content to “additional_texts” along with a location value. The location should match the layout of the image and must be one of the following:',
+            '    “bottom-right”, “bottom-left”, “bottom-mid”, “top-left”, “top-mid”, “top-right”.',
             '',
             '**Task:**',
             '',
@@ -1000,9 +1032,25 @@ const getFlows = (() => {
             '3. Identify whether the image contains **any logo that could be replaced** with the new brand logo.',
             '4. Return the final result strictly in the following JSON structure:',
             '',
-            '{\n  "original_texts": [\n    "..."\n  ],\n  "updated_texts": [\n    "..."\n  ],\n  "replacable_logo": true\n}',
+            '```json',
+            '{',
+            '  "original_texts": [',
+            '    "..."',
+            '  ],',
+            '  "updated_texts": [',
+            '    "..."',
+            '  ],',
+            '  "additional_texts": [',
+            '    {"...": "..."}',
+            '  ],',
+            '  "replacable_logo": boolean',
+            '}',
+            '```',
+            '',
+            'Only include the JSON in your final answer.',
           ].join('\n');
-          console.log(brandJson);
+          
+          console.log('[generateSmartBlueprint] Prompt table:', fieldValuesJson);
 
           // Prepare image media in Genkit prompt format
           const mediaParts = [];
@@ -1010,26 +1058,12 @@ const getFlows = (() => {
             mediaParts.push({
               media: { contentType: 'image/jpeg', url: `data:image/jpeg;base64,${imageBase64}` },
             });
-          } else if (imageUrl) {
-            // Fetch and convert to data URL to ensure Gemini receives the image
-            try {
-              const r = await fetch(imageUrl);
-              const mimeType = r.headers.get('content-type') || 'image/jpeg';
-              const buffer = Buffer.from(await r.arrayBuffer());
-              const b64 = buffer.toString('base64');
-              mediaParts.push({
-                media: { contentType: mimeType, url: `data:${mimeType};base64,${b64}` },
-              });
-            } catch (e) {
-              console.warn('Failed to fetch imageUrl; passing URL directly:', e?.message || e);
-              mediaParts.push({ media: { contentType: 'image/jpeg', url: imageUrl } });
-            }
           }
 
           // Build Genkit prompt for Gemini (media + instruction)
           const promptArray = [...mediaParts, { text: promptText }];
 
-          console.log('[updateImageTextsForBrand] Calling Gemini with', {
+          console.log('[generateSmartBlueprint] Calling Gemini with', {
             images: mediaParts.length,
           });
 
@@ -1041,7 +1075,7 @@ const getFlows = (() => {
           });
 
           // Log raw text for debugging
-          console.log('[updateImageTextsForBrand] Gemini raw text:', text);
+          console.log('[generateSmartBlueprint] Gemini raw text:', text);
 
           let json;
           try {
@@ -1063,15 +1097,16 @@ const getFlows = (() => {
             }
             json = JSON.parse(toParse);
           } catch (e) {
-            console.error('[updateImageTextsForBrand] JSON parse failed:', e?.message || e);
-            console.error('[updateImageTextsForBrand] Raw text:', text);
-            console.error('[updateImageTextsForBrand] Cleaned text:', (text || '').trim());
+            console.error('[generateSmartBlueprint] JSON parse failed:', e?.message || e);
+            console.error('[generateSmartBlueprint] Raw text:', text);
+            console.error('[generateSmartBlueprint] Cleaned text:', (text || '').trim());
             throw new Error('Gemini returned non-JSON output');
           }
           const parsed = z
             .object({
               original_texts: z.array(z.string()),
-              updated_texts: z.array(z.string()),
+              updated_texts: z.array(z.string().nullable()),
+              additional_texts: z.array(z.record(z.string())),
               replacable_logo: z.boolean(),
             })
             .parse(json);
@@ -1079,18 +1114,18 @@ const getFlows = (() => {
         },
       );
 
-      return { generateImageFlow, updateImageTextsForBrand: extractText, buildRebrandBlueprint };
+      return { generateImageFlow, generateSmartBlueprint: generateSmartBlueprintFlow, buildRebrandBlueprint };
     })();
     return bootPromise;
   };
 })();
 
-// HTTP wrapper: POST /api/updateImageTextsForBrand
-exports.updateImageTextsForBrand = onRequest(
+// HTTP wrapper: POST /api/generateSmartBlueprint
+exports.generateSmartBlueprint = onRequest(
   {
     region: 'europe-west1',
     timeoutSeconds: 60,
-    memory: '256MiB',
+    memory: '512MiB',
     cors: true,
     secrets: [GOOGLE_API_KEY, FREEPIK_API_KEY],
   },
@@ -1105,30 +1140,78 @@ exports.updateImageTextsForBrand = onRequest(
       if (req.method !== 'POST') {
         return res.status(405).json({ error: 'Method not allowed. Use POST.' });
       }
+
+      // Check for multipart/form-data
+      if (!req.headers['content-type'] || !req.headers['content-type'].includes('multipart/form-data')) {
+        return res.status(400).json({ error: 'Content-Type must be multipart/form-data' });
+      }
+
+      const busboy = Busboy({ headers: req.headers });
+      const fields = {};
+      let imageBuffer = null;
+
       try {
-        const {
-          brand,
-          imageUrl,
-          imageBase64,
-          includeBlueprint,
-          userId,
-          templateId,
-          templateUrl,
-          aspectRatio,
-        } = req.body || {};
-        const { updateImageTextsForBrand, buildRebrandBlueprint } = await getFlows();
-        const llmResult = await updateImageTextsForBrand({ brand, imageUrl, imageBase64 });
-        if (includeBlueprint) {
-          const blueprint = buildRebrandBlueprint({
-            llmResult,
-            brand,
-            userId: userId || null,
-            templateId: templateId || null,
-            templateUrl: templateUrl || null,
-            aspectRatio: aspectRatio || null,
+        await new Promise((resolve, reject) => {
+          busboy.on('field', (fieldname, val) => {
+            fields[fieldname] = val;
           });
-          return res.status(200).json({ llm_result: llmResult, blueprint });
+
+          busboy.on('file', (fieldname, file, { filename, mimeType }) => {
+            if (fieldname === 'croppedImage') {
+              const chunks = [];
+              file.on('data', (data) => chunks.push(data));
+              file.on('end', () => {
+                imageBuffer = Buffer.concat(chunks);
+              });
+            } else {
+              file.resume(); // Discard other files
+            }
+          });
+
+          busboy.on('finish', resolve);
+          busboy.on('error', reject);
+
+          if (req.rawBody) {
+            busboy.end(req.rawBody);
+          } else {
+            req.pipe(busboy);
+          }
+        });
+
+        const { user_id, brand_id, updateFields } = fields;
+
+        if (!user_id || !brand_id) {
+          return res.status(400).json({ error: 'Missing required fields: user_id, brand_id' });
         }
+
+        if (!imageBuffer) {
+          return res.status(400).json({ error: 'Missing required file: croppedImage' });
+        }
+
+        // Fetch brand from Firestore
+        const brandDoc = await db.collection('users').doc(user_id).collection('brands').doc(brand_id).get();
+        if (!brandDoc.exists) {
+          return res.status(404).json({ error: 'Brand not found' });
+        }
+
+        const brandData = brandDoc.data();
+        let parsedUpdateFields = null;
+
+        // Parse updateFields JSON
+        if (updateFields) {
+          try {
+            parsedUpdateFields = JSON.parse(updateFields);
+          } catch (e) {
+            console.warn('Invalid updateFields JSON', e);
+            return res.status(400).json({ error: 'Invalid updateFields JSON format' });
+          }
+        }
+
+        const imageBase64 = imageBuffer.toString('base64');
+
+        const { generateSmartBlueprint } = await getFlows();
+        const llmResult = await generateSmartBlueprint({ brand: brandData, imageBase64, updateFields: parsedUpdateFields });
+
         return res.status(200).json(llmResult);
       } catch (err) {
         if (err && (err.name === 'ZodError' || err.issues)) {
@@ -1136,7 +1219,7 @@ exports.updateImageTextsForBrand = onRequest(
             .status(400)
             .json({ error: 'Invalid input', details: err.issues || String(err) });
         }
-        console.error('updateImageTextsForBrand error:', err);
+        console.error('generateSmartBlueprint error:', err);
         return res
           .status(500)
           .json({ error: 'Internal error', details: String(err?.message || err) });
