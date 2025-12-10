@@ -1326,8 +1326,8 @@ exports.addBrand = onRequest(
 exports.updateBrand = onRequest(
   {
     region: 'europe-west1',
-    timeoutSeconds: 30,
-    memory: '256MiB',
+    timeoutSeconds: 60,
+    memory: '512MiB',
     cors: true,
   },
   async (req, res) => {
@@ -1342,29 +1342,147 @@ exports.updateBrand = onRequest(
       if (req.method !== 'POST') {
         return res.status(405).json({ success: false, error: 'Method not allowed. Use POST.' });
       }
+
+      let user_id;
+      let brand_id;
+      let brandInfo = {};
+      let logoFile = null;
+
       try {
-        const { user_id, brand_id, brandInfo } = req.body || {};
+        if (req.headers['content-type'] && req.headers['content-type'].includes('multipart/form-data')) {
+          const busboy = Busboy({ headers: req.headers });
+          const fields = {};
+          const writes = [];
+
+          await new Promise((resolve, reject) => {
+            busboy.on('field', (fieldname, val) => {
+              fields[fieldname] = val;
+            });
+
+            busboy.on('file', (fieldname, file, { filename, mimeType }) => {
+              if (fieldname === 'logo') {
+                const filepath = path.join(os.tmpdir(), `logo_${randomUUID()}_${filename}`);
+                logoFile = { filepath, filename, mimeType };
+                const writeStream = fs.createWriteStream(filepath);
+                file.pipe(writeStream);
+                writes.push(new Promise((res, rej) => {
+                  writeStream.on('finish', res);
+                  writeStream.on('error', rej);
+                }));
+              } else {
+                file.resume();
+              }
+            });
+
+            busboy.on('finish', async () => {
+              await Promise.all(writes);
+              resolve();
+            });
+
+            busboy.on('error', reject);
+
+            if (req.rawBody) {
+              busboy.end(req.rawBody);
+            } else {
+              req.pipe(busboy);
+            }
+          });
+
+          user_id = fields.user_id;
+          brand_id = fields.brand_id;
+          if (fields.brandInfo) {
+            try {
+              brandInfo = JSON.parse(fields.brandInfo);
+            } catch (e) {
+              return res.status(400).json({ success: false, error: 'Invalid brandInfo JSON' });
+            }
+          }
+        } else {
+          user_id = req.body.user_id;
+          brand_id = req.body.brand_id;
+          brandInfo = req.body.brandInfo || {};
+        }
+
         if (!user_id || typeof user_id !== 'string') {
           return res.status(400).json({ success: false, error: 'Missing required field: user_id' });
         }
         if (!brand_id || typeof brand_id !== 'string') {
           return res.status(400).json({ success: false, error: 'Missing required field: brand_id' });
         }
-        if (!brandInfo || typeof brandInfo !== 'object') {
-          return res.status(400).json({ success: false, error: 'Missing required field: brandInfo' });
-        }
 
         const brandRef = db.collection('users').doc(user_id).collection('brands').doc(brand_id);
         const existing = await brandRef.get();
         if (!existing.exists) {
+          if (logoFile) fs.unlink(logoFile.filepath, () => {});
           return res.status(404).json({ success: false, error: 'Brand not found' });
         }
 
-        const updatePayload = { ...brandInfo, updatedAt: FieldValue.serverTimestamp() };
+        let logoUrl = undefined;
+        if (logoFile) {
+          // Delete old logo(s)
+          const prefix = `images/brand_logos/${user_id}/${brand_id}/`;
+          try {
+            const [files] = await bucket.getFiles({ prefix });
+            if (files.length > 0) {
+              await Promise.all(files.map((f) => f.delete()));
+            }
+          } catch (e) {
+            console.warn('Failed to cleanup old logos:', e);
+          }
+
+          // Upload new logo
+          try {
+            const downloadToken = randomUUID();
+            const destination = `${prefix}${logoFile.filename}`;
+            const [file] = await bucket.upload(logoFile.filepath, {
+              destination,
+              metadata: {
+                contentType: logoFile.mimeType,
+                metadata: {
+                  firebaseStorageDownloadTokens: downloadToken,
+                },
+              },
+            });
+
+            try {
+              const [url] = await file.getSignedUrl({
+                action: 'read',
+                expires: new Date(Date.now() + 1000 * 60 * 60 * 24 * 365),
+              });
+              logoUrl = url;
+            } catch (signErr) {
+              const bName = bucket.name || `${process.env.GCLOUD_PROJECT || 'brandize-101db'}.appspot.com`;
+              logoUrl = `https://firebasestorage.googleapis.com/v0/b/${bName}/o/${encodeURIComponent(destination)}?alt=media&token=${downloadToken}`;
+            }
+          } catch (uploadErr) {
+            throw new Error('Failed to upload logo: ' + uploadErr.message);
+          } finally {
+            fs.unlink(logoFile.filepath, () => {});
+          }
+        }
+
+        const updatePayload = {
+          updatedAt: FieldValue.serverTimestamp(),
+        };
+
+        if (brandInfo) {
+          if (typeof brandInfo.brandName !== 'undefined') updatePayload.brandName = brandInfo.brandName;
+          if (typeof brandInfo.website !== 'undefined') updatePayload.website = brandInfo.website;
+          if (typeof brandInfo.phone !== 'undefined') updatePayload.phone = brandInfo.phone;
+          if (typeof brandInfo.address !== 'undefined') updatePayload.address = brandInfo.address;
+          if (typeof brandInfo.description !== 'undefined') updatePayload.description = brandInfo.description;
+          if (typeof brandInfo.colorPalette !== 'undefined') updatePayload.colorPalette = brandInfo.colorPalette;
+        }
+
+        if (logoUrl) {
+          updatePayload.logoUrl = logoUrl;
+        }
+
         await brandRef.set(updatePayload, { merge: true });
-        return res.status(200).json({ success: true });
+        return res.status(200).json({ success: true, logoUrl });
       } catch (err) {
         console.error('updateBrand error:', err);
+        if (logoFile) fs.unlink(logoFile.filepath, () => {});
         return res
           .status(500)
           .json({ success: false, error: 'Internal error updating brand', details: String(err?.message || err) });
