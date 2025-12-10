@@ -1501,17 +1501,20 @@ exports.deleteBrand = onRequest(
   async (req, res) => {
     if (req.method === 'OPTIONS') {
       res.set('Access-Control-Allow-Origin', '*');
-      res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+      res.set('Access-Control-Allow-Methods', 'DELETE, OPTIONS');
       res.set('Access-Control-Allow-Headers', 'Content-Type');
       return res.status(204).send('');
     }
 
     return cors(req, res, async () => {
-      if (req.method !== 'POST') {
-        return res.status(405).json({ success: false, error: 'Method not allowed. Use POST.' });
+      if (req.method !== 'DELETE') {
+        return res.status(405).json({ success: false, error: 'Method not allowed. Use DELETE.' });
       }
       try {
-        const { user_id, brand_id } = req.body || {};
+        // Support both body (if client sends it) and query params (standard for DELETE)
+        const user_id = (req.body?.user_id || req.query?.user_id);
+        const brand_id = (req.body?.brand_id || req.query?.brand_id);
+
         if (!user_id || typeof user_id !== 'string') {
           return res.status(400).json({ success: false, error: 'Missing required field: user_id' });
         }
@@ -1520,22 +1523,19 @@ exports.deleteBrand = onRequest(
         }
 
         const brandRef = db.collection('users').doc(user_id).collection('brands').doc(brand_id);
-        const existing = await brandRef.get();
-        if (!existing.exists) {
-          console.warn(`deleteBrand: brand not found for user ${user_id}, id ${brand_id}`);
-        }
 
-        // Attempt Firestore delete regardless
-        await brandRef.delete().catch((e) => {
-          console.warn('deleteBrand Firestore delete error:', e?.message || e);
-        });
+        // Delete Firestore document
+        await brandRef.delete();
 
-        // Attempt to delete logo file at the conventional path; ignore not found
-        const logoPath = `images/brands/${user_id}/${brand_id}/logo.png`;
+        // Delete all files in the brand's storage folder (logos)
+        const prefix = `images/brand_logos/${user_id}/${brand_id}/`;
         try {
-          await bucket.file(logoPath).delete({ ignoreNotFound: true });
+          const [files] = await bucket.getFiles({ prefix });
+          if (files.length > 0) {
+            await Promise.all(files.map((f) => f.delete()));
+          }
         } catch (e) {
-          console.warn('deleteBrand logo delete warning:', e?.message || e);
+          console.warn('deleteBrand storage cleanup warning:', e?.message || e);
         }
 
         return res.status(200).json({ success: true });
