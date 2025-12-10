@@ -15,6 +15,10 @@ const admin = require('firebase-admin');
 const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 const { randomUUID } = require('crypto');
 const JSZip = require('jszip');
+const Busboy = require('busboy');
+const path = require('path');
+const os = require('os');
+const fs = require('fs');
 try {
   if (!admin.apps.length) {
     // Artık her şey FIREBASE_CONFIG üzerinden otomatik gelecek
@@ -1149,8 +1153,8 @@ exports.updateImageTextsForBrand = onRequest(
 exports.addBrand = onRequest(
   {
     region: 'europe-west1',
-    timeoutSeconds: 30,
-    memory: '256MiB',
+    timeoutSeconds: 60,
+    memory: '512MiB',
     cors: true,
   },
   async (req, res) => {
@@ -1167,8 +1171,72 @@ exports.addBrand = onRequest(
         return res.status(405).json({ success: false, error: 'Method not allowed. Use POST.' });
       }
 
+      let user_id;
+      let brandInfo;
+      let logoFile = null;
+
       try {
-        const { user_id, brandInfo } = req.body || {};
+        if (req.headers['content-type'] && req.headers['content-type'].includes('multipart/form-data')) {
+          console.log('Processing multipart request for addBrand');
+          const busboy = Busboy({ headers: req.headers });
+          const fields = {};
+          const writes = [];
+
+          await new Promise((resolve, reject) => {
+            busboy.on('field', (fieldname, val) => {
+              console.log(`Busboy field: ${fieldname}`);
+              fields[fieldname] = val;
+            });
+
+            busboy.on('file', (fieldname, file, { filename, mimeType }) => {
+              console.log(`Busboy file: ${fieldname}, filename: ${filename}, mimeType: ${mimeType}`);
+              if (fieldname === 'logo') {
+                const filepath = path.join(os.tmpdir(), `logo_${randomUUID()}_${filename}`);
+                logoFile = { filepath, filename, mimeType };
+                const writeStream = fs.createWriteStream(filepath);
+                file.pipe(writeStream);
+                writes.push(new Promise((res, rej) => {
+                  writeStream.on('finish', res);
+                  writeStream.on('error', rej);
+                }));
+              } else {
+                console.log(`Skipping file field: ${fieldname}`);
+                file.resume();
+              }
+            });
+
+            busboy.on('finish', async () => {
+              console.log('Busboy finished parsing');
+              await Promise.all(writes);
+              resolve();
+            });
+
+            busboy.on('error', (err) => {
+              console.error('Busboy error:', err);
+              reject(err);
+            });
+
+            if (req.rawBody) {
+              console.log('Using req.rawBody for busboy');
+              busboy.end(req.rawBody);
+            } else {
+              console.log('Piping req to busboy');
+              req.pipe(busboy);
+            }
+          });
+
+          user_id = fields.user_id;
+          try {
+            brandInfo = fields.brandInfo ? JSON.parse(fields.brandInfo) : null;
+          } catch (e) {
+            return res.status(400).json({ success: false, error: 'Invalid brandInfo JSON' });
+          }
+        } else {
+          console.log('Processing JSON request for addBrand');
+          user_id = req.body.user_id;
+          brandInfo = req.body.brandInfo;
+        }
+
         if (!user_id || typeof user_id !== 'string') {
           return res.status(400).json({ success: false, error: 'Missing required field: user_id' });
         }
@@ -1184,6 +1252,49 @@ exports.addBrand = onRequest(
 
         const brandsCol = db.collection('users').doc(user_id).collection('brands');
         const brandRef = brandsCol.doc(); // auto-id
+
+        let logoUrl = null;
+        if (logoFile) {
+          console.log('Uploading logo file:', logoFile.filepath);
+          try {
+            const downloadToken = randomUUID();
+            const destination = `images/brand_logos/${user_id}/${brandRef.id}/${logoFile.filename}`;
+            const [file] = await bucket.upload(logoFile.filepath, {
+              destination,
+              metadata: {
+                contentType: logoFile.mimeType,
+                metadata: {
+                  firebaseStorageDownloadTokens: downloadToken
+                }
+              },
+            });
+
+            // Try to get signed URL (valid for 1 year)
+            try {
+              const [url] = await file.getSignedUrl({
+                action: 'read',
+                expires: new Date(Date.now() + 1000 * 60 * 60 * 24 * 365),
+              });
+              logoUrl = url;
+              console.log('Logo uploaded successfully, signed url:', logoUrl);
+            } catch (signErr) {
+              console.warn('getSignedUrl failed, falling back to token URL:', signErr.message);
+              // Fallback to token-based URL
+              // Ensure bucket name is correct. If bucket.name is missing, try to infer it or use a placeholder (though it should be there).
+              const bName = bucket.name || `${process.env.GCLOUD_PROJECT || 'brandize-101db'}.appspot.com`;
+              logoUrl = `https://firebasestorage.googleapis.com/v0/b/${bName}/o/${encodeURIComponent(destination)}?alt=media&token=${downloadToken}`;
+              console.log('Logo uploaded successfully, token url:', logoUrl);
+            }
+          } catch (uploadErr) {
+            console.error('Logo upload failed:', uploadErr);
+            throw new Error('Failed to upload logo: ' + uploadErr.message);
+          } finally {
+            fs.unlink(logoFile.filepath, () => {});
+          }
+        } else {
+          console.log('No logo file to upload');
+        }
+
         const nowFields = {
           createdAt: FieldValue.serverTimestamp(),
           updatedAt: FieldValue.serverTimestamp(),
@@ -1195,13 +1306,15 @@ exports.addBrand = onRequest(
           address: brandInfo.address ?? null,
           description: brandInfo.description ?? null,
           colorPalette: Array.isArray(brandInfo.colorPalette) ? brandInfo.colorPalette : [],
+          logoUrl: logoUrl || null,
           ...nowFields,
         };
 
         await brandRef.set(docData);
-        return res.status(200).json({ success: true, brandId: brandRef.id });
+        return res.status(200).json({ success: true, brandId: brandRef.id, logoUrl });
       } catch (err) {
         console.error('addBrand error:', err);
+        if (logoFile) fs.unlink(logoFile.filepath, () => {});
         return res
           .status(500)
           .json({ success: false, error: 'Internal error creating brand', details: String(err?.message || err) });
