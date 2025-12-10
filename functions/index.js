@@ -973,7 +973,7 @@ const getFlows = (() => {
             .object({
               brand: z.record(z.any()),
               imageBase64: z.string(),
-              updateFields: z.record(z.boolean()).optional(),
+              updateFields: z.record(z.boolean()),
             }),
           outputSchema: z.object({
             original_texts: z.array(z.string()),
@@ -987,20 +987,11 @@ const getFlows = (() => {
 
           // Construct the field values table for the prompt
           const fieldValues = {};
-          if (updateFields) {
-            for (const [key, enabled] of Object.entries(updateFields)) {
-              if (enabled && brand[key]) {
-                fieldValues[key] = brand[key];
-              } else {
-                fieldValues[key] = null;
-              }
-            }
-          } else {
-            // Default behavior if updateFields is not provided: use all available brand fields
-            // Assuming standard fields: brandName, phone, website, address
-            const standardFields = ['brandName', 'phone', 'website', 'address'];
-            for (const key of standardFields) {
-              fieldValues[key] = brand[key] || null;
+          for (const [key, enabled] of Object.entries(updateFields)) {
+            if (enabled && brand[key]) {
+              fieldValues[key] = brand[key];
+            } else {
+              fieldValues[key] = null;
             }
           }
 
@@ -1180,8 +1171,8 @@ exports.generateSmartBlueprint = onRequest(
 
         const { user_id, brand_id, updateFields } = fields;
 
-        if (!user_id || !brand_id) {
-          return res.status(400).json({ error: 'Missing required fields: user_id, brand_id' });
+        if (!user_id || !brand_id || !updateFields) {
+          return res.status(400).json({ error: 'Missing required fields: user_id, brand_id, updateFields' });
         }
 
         if (!imageBuffer) {
@@ -1195,16 +1186,14 @@ exports.generateSmartBlueprint = onRequest(
         }
 
         const brandData = brandDoc.data();
-        let parsedUpdateFields = null;
+        let parsedUpdateFields;
 
         // Parse updateFields JSON
-        if (updateFields) {
-          try {
-            parsedUpdateFields = JSON.parse(updateFields);
-          } catch (e) {
-            console.warn('Invalid updateFields JSON', e);
-            return res.status(400).json({ error: 'Invalid updateFields JSON format' });
-          }
+        try {
+          parsedUpdateFields = JSON.parse(updateFields);
+        } catch (e) {
+          console.warn('Invalid updateFields JSON', e);
+          return res.status(400).json({ error: 'Invalid updateFields JSON format' });
         }
 
         const imageBase64 = imageBuffer.toString('base64');
