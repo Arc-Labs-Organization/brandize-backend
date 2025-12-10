@@ -1548,3 +1548,57 @@ exports.deleteBrand = onRequest(
     });
   },
 );
+
+exports.getBrands = onRequest(
+  {
+    region: 'europe-west1',
+    timeoutSeconds: 30,
+    memory: '256MiB',
+    cors: true,
+  },
+  async (req, res) => {
+    // CORS preflight
+    if (req.method === 'OPTIONS') {
+      res.set('Access-Control-Allow-Origin', '*');
+      res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
+      res.set('Access-Control-Allow-Headers', 'Content-Type');
+      return res.status(204).send('');
+    }
+
+    return cors(req, res, async () => {
+      if (req.method !== 'GET') {
+        return res.status(405).json({ success: false, error: 'Method not allowed. Use GET.' });
+      }
+
+      try {
+        const user_id = (req.query.user_id || '').toString().trim();
+
+        if (!user_id) {
+          return res.status(400).json({ success: false, error: 'Missing required query parameter: user_id' });
+        }
+
+        const brandsSnapshot = await db
+          .collection('users')
+          .doc(user_id)
+          .collection('brands')
+          .orderBy('createdAt', 'desc')
+          .get();
+
+        const brands = [];
+        brandsSnapshot.forEach((doc) => {
+          brands.push({
+            id: doc.id,
+            ...doc.data(),
+          });
+        });
+
+        return res.status(200).json({ success: true, brands });
+      } catch (err) {
+        console.error('getBrands error:', err);
+        return res
+          .status(500)
+          .json({ success: false, error: 'Internal error fetching brands', details: String(err?.message || err) });
+      }
+    });
+  },
+);
