@@ -12,4 +12,12 @@ function createMultipartParser(headers) {
   }
 }
 
-module.exports = { createMultipartParser };
+// Path helpers (centralized for consistency)
+function buildCommonImagePath(imageId, ext) {
+  return `images/common/${imageId}.${ext}`;
+}
+function buildGeneratedImagePath(uid, imageId, ext) {
+  return `images/generated/${uid}/${imageId}.${ext}`;
+}
+
+module.exports = { createMultipartParser, buildCommonImagePath, buildGeneratedImagePath };
