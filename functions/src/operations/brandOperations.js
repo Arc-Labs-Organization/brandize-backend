@@ -7,7 +7,7 @@ const Busboy = require('busboy');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { createMultipartParser } = require('./utils');
+const { createMultipartParser } = require('../common/utils');
 
 try {
   if (!admin.apps.length) {

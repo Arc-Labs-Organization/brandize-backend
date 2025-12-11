@@ -5,7 +5,7 @@ const admin = require('firebase-admin');
 const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 const { randomUUID } = require('crypto');
 const JSZip = require('jszip');
-const { buildCommonImagePath } = require('./utils');
+const { buildCommonImagePath } = require('../common/utils');
 const { ensureUserExists, decrementUsage } = require('./userOperations');
 
 try {
