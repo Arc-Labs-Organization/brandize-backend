@@ -476,7 +476,7 @@ exports.freepikDownload = onRequest(
  * Body: { prompt: string, style?: string, aspectRatio?: '1:1'|'16:9'|'9:16'|'3:2'|'2:3'|'4:3'|'3:4'|'5:4'|'4:5'|'21:9' }
  * Returns: { imageBase64: string, mimeType: string, modelVersion?: string }
  */
-exports.generateImageV2 = onRequest(
+exports.generateImage = onRequest(
   {
     region: 'europe-west1',
     timeoutSeconds: 120,
@@ -498,43 +498,81 @@ exports.generateImageV2 = onRequest(
         return res.status(405).json({ error: 'Method not allowed. Use POST.' });
       }
 
-      const {
-        prompt,
-        style,
-        aspectRatio,
-        mockupImageUrl,
-        logoUrl,
-        uid,
-        templateId,
-        cropRect,
-        blueprint,
-      } = req.body || {};
-
-      if ((!prompt || typeof prompt !== 'string' || !prompt.trim()) && !blueprint) {
-        return res.status(400).json({ error: 'Missing required field: prompt (string).' });
+      // Check for multipart/form-data
+      if (!req.headers['content-type'] || !req.headers['content-type'].includes('multipart/form-data')) {
+        return res.status(400).json({ error: 'Content-Type must be multipart/form-data' });
       }
 
-      if (!uid || typeof uid !== 'string') {
-        return res.status(400).json({ error: 'Missing required field: uid (string).' });
-      }
+      const busboy = createMultipartParser(req.headers);
+      const fields = {};
+      let imageBuffer = null;
+      let imageMimeType = null;
 
       try {
-        const { generateImageFlow } = await getFlows();
-        const finalPrompt =
-          (!prompt || !String(prompt).trim()) && blueprint
-            ? 'Rebrand this design according to the provided blueprint and brand guidelines.'
-            : String(prompt || '').trim();
-        const result = await generateImageFlow({
-          prompt: finalPrompt,
-          style,
-          aspectRatio,
-          mockupImageUrl,
-          logoUrl,
-          uid,
-          templateId,
-          cropRect,
-          blueprint,
+        await new Promise((resolve, reject) => {
+          busboy.on('field', (fieldname, val) => {
+            fields[fieldname] = val;
+          });
+
+          busboy.on('file', (fieldname, file, { filename, mimeType }) => {
+            if (fieldname === 'croppedImage') {
+              const chunks = [];
+              file.on('data', (data) => chunks.push(data));
+              file.on('end', () => {
+                imageBuffer = Buffer.concat(chunks);
+                imageMimeType = mimeType;
+              });
+            } else {
+              file.resume(); // Discard other files
+            }
+          });
+
+          busboy.on('finish', resolve);
+          busboy.on('error', reject);
+
+          if (req.rawBody) {
+            busboy.end(req.rawBody);
+          } else {
+            req.pipe(busboy);
+          }
         });
+
+        const { uid, brand_id, blueprint } = fields;
+
+        if (!uid || !brand_id || !blueprint) {
+          return res.status(400).json({ error: 'Missing required fields: uid, brand_id, blueprint' });
+        }
+
+        if (!imageBuffer) {
+          return res.status(400).json({ error: 'Missing required file: croppedImage' });
+        }
+
+        // Fetch brand from Firestore
+        const brandDoc = await db.collection('users').doc(uid).collection('brands').doc(brand_id).get();
+        if (!brandDoc.exists) {
+          return res.status(404).json({ error: 'Brand not found' });
+        }
+
+        const brandData = brandDoc.data();
+        let parsedBlueprint;
+
+        try {
+          parsedBlueprint = JSON.parse(blueprint);
+        } catch (e) {
+          return res.status(400).json({ error: 'Invalid blueprint JSON format' });
+        }
+
+        const croppedImageBase64 = imageBuffer.toString('base64');
+
+        const { generateImageFlow } = await getFlows();
+        const result = await generateImageFlow({
+          uid,
+          brand: brandData,
+          blueprint: parsedBlueprint,
+          croppedImageBase64,
+          croppedImageMimeType: imageMimeType,
+        });
+
         return res.status(200).json(result);
       } catch (err) {
         if (err && (err.name === 'ZodError' || err.issues)) {
@@ -628,10 +666,7 @@ const getFlows = (() => {
           text_updates[key] = val;
         }
 
-        const additions = [];
-        if (brand?.brandLogoUrl) additions.push({ type: 'brand_logo', location: 'top-right' });
-        if (brand?.brandWebsite) additions.push({ type: 'website', location: 'bottom-mid' });
-        if (brand?.phoneNumber) additions.push({ type: 'phone_number', location: 'bottom-right' });
+        const additions = {};
 
         return {
           user_id: userId || null,
@@ -649,34 +684,11 @@ const getFlows = (() => {
         {
           name: 'generateImage',
           inputSchema: z.object({
-            prompt: z.string().min(1),
-            style: z.string().optional(),
-            aspectRatio: z.enum(allowedRatios).optional(),
-            mockupImageUrl: z.string().url().optional(),
-            logoUrl: z.string().url().optional(),
-            // Optional: blueprint input to drive prompt construction
-            blueprint: z
-              .object({
-                user_id: z.string().nullable().optional(),
-                template_id: z.string().nullable().optional(),
-                template_url: z.string().url().nullable().optional(),
-                replace_logo: z.boolean().optional(),
-                use_brand_colors: z.boolean().optional(),
-                text_updates: z.record(z.string().nullable()).optional(),
-                additions: z.array(z.object({ type: z.string(), location: z.string() })).optional(),
-                aspect_ratio: z.enum(allowedRatios).nullable().optional(),
-              })
-              .optional(),
-            //templateId: z.string().optional(), // freepikDownload'tan gelen uuid
-            // cropRect: z
-            //  .object({
-            // 	x: z.number(),
-            // 	y: z.number(),
-            // 	width: z.number(),
-            // 	height: z.number(),
-            // 	})
-            // 	.optional(), // varsa crop bilgisi
             uid: z.string().min(1),
+            brand: z.record(z.any()).optional(),
+            blueprint: z.record(z.any()),
+            croppedImageBase64: z.string(),
+            croppedImageMimeType: z.string().optional(),
           }),
           outputSchema: z.object({
             mimeType: z.string(),
@@ -686,153 +698,169 @@ const getFlows = (() => {
             downloadUrl: z.string().optional().nullable(),
           }),
         },
-        async ({ prompt, style, aspectRatio, mockupImageUrl, logoUrl, uid, blueprint }) => {
+        async ({ uid, brand, blueprint, croppedImageBase64, croppedImageMimeType }) => {
           // Ensure user exists and decrement generate usage
           await ensureUserExists(uid);
           await decrementUsage(uid, 'generate');
 
-          // If blueprint is provided, prefer it to build the natural language prompt
-          let fullPrompt;
-          if (blueprint && typeof blueprint === 'object') {
-            const bp = blueprint;
-            const textOps = bp.text_updates || {};
-            const additions = Array.isArray(bp.additions) ? bp.additions : [];
-            const parts = [];
-            parts.push('Update the design per the following blueprint suggestions.');
-            if (bp.use_brand_colors)
-              parts.push('Apply the brand colors consistently to key elements (backgrounds, buttons, highlights) ' + 'but keep the overall contrast and readability high.');
-            if (bp.replace_logo)
-              parts.push(
-                    'If there is an existing logo, replace it with the provided brand logo. ' + 'Keep the approximate size and position similar to the original logo placement.',
-              );
-            // Text updates
-            const keys = Object.keys(textOps);
-            if (keys.length) {
-              parts.push('TEXT RULES: Only modify the texts explicitly listed below. ' + 'Do NOT change any other text in the design.');
-              for (const k of keys) {
-                const v = textOps[k];
-                if (v === null || typeof v === 'undefined') {
-                  parts.push(`- Remove text: "${k}"`);
-                } else {
-                  parts.push(`- Replace "${k}" with "${v}" while preserving the approximate font size, ` + 'weight, and position.');
+          const bp = blueprint || {};
+          const textOps = bp.text_updates || {};
+          const additions = bp.additions || {};
+          
+          const parts = [];
+          parts.push('Update the design per the following blueprint suggestions.');
+
+          // Brand Colors
+          if (bp.use_brand_colors && brand?.colorPalette && Array.isArray(brand.colorPalette) && brand.colorPalette.length > 0) {
+             parts.push(`Use the following brand colors: ${brand.colorPalette.join(', ')}.`);
+          }
+
+          // Text Updates
+          const keys = Object.keys(textOps);
+          if (keys.length) {
+            parts.push('Text updates:');
+            for (const key of keys) {
+              const val = textOps[key];
+              if (val === null || val === undefined) {
+                parts.push(`- Remove the text "${key}".`);
+              } else {
+                parts.push(`- Change "${key}" to "${val}".`);
+              }
+            }
+          }
+
+          // Additions & Logo Replacement
+          let logoUrlToFetch = null;
+          
+          // Check if we need to use the brand logo
+          const needsLogo = bp.replace_logo || (additions && Object.keys(additions).some(k => {
+             const lower = k.toLowerCase();
+             return lower === 'brand_logo' || lower === 'logo';
+          }));
+          
+          if (needsLogo && brand?.logoUrl) {
+             logoUrlToFetch = brand.logoUrl;
+          }
+
+          if (bp.replace_logo) {
+             parts.push('Replace the existing logo with the provided brand logo.');
+          }
+
+          // Handle additions (object: type -> location)
+          if (additions) {
+             for (const [type, location] of Object.entries(additions)) {
+                const lowerType = type.toLowerCase();
+                
+                if (lowerType === 'brand_logo' || lowerType === 'logo') {
+                   parts.push(`Place the brand logo at ${location}.`);
+                   continue;
                 }
-              }
-            }
-            // Additions
-            if (additions.length) {
-              parts.push('ADDITIONS: Add only the following elements. Do NOT invent other new elements: ');
-              for (const add of additions) {
-                parts.push(`- Add ${add.type} at ${add.location}`);
-              }
-            }
-            // Aspect ratio
-            if (bp.aspect_ratio && allowedRatios.includes(bp.aspect_ratio)) {
-              aspectRatio = bp.aspect_ratio;
-            }
+                
+                if (lowerType === 'brand_website' || lowerType === 'website') {
+                   if (brand?.website) {
+                      parts.push(`Add the website "${brand.website}" at ${location}.`);
+                   }
+                   continue;
+                }
+                
+                if (lowerType === 'phone_number' || lowerType === 'phone') {
+                   if (brand?.phone) {
+                      parts.push(`Add the phone number "${brand.phone}" at ${location}.`);
+                   }
+                   continue;
+                }
 
-            parts.push('GENERAL RULES: Preserve the overall layout, composition, and visual hierarchy of the original design. ' + 'Do not remove or drastically move major visual elements unless explicitly requested.');
+                if (lowerType === 'brand_name' || lowerType === 'name') {
+                   if (brand?.brandName) {
+                      parts.push(`Add the brand name "${brand.brandName}" at ${location}.`);
+                   }
+                   continue;
+                }
 
-            fullPrompt = parts.join(' \n');
-          } else {
-            const stylePrefix = style ? `Style: ${style}. ` : '';
-            fullPrompt = `${stylePrefix}${prompt}`.trim();
+                if (lowerType === 'brand_address' || lowerType === 'address') {
+                   if (brand?.address) {
+                      parts.push(`Add the address "${brand.address}" at ${location}.`);
+                   }
+                   continue;
+                }
+             }
           }
 
-          // Best-effort: If a mockup image URL is provided, try to fetch it and include as multimodal input.
-          // If anything fails, we fallback to text-only generation.
-          let imageInput = null;
-          let logoInput = null;
-          if (mockupImageUrl) {
-            try {
-              const r = await fetch(mockupImageUrl);
-              const mimeType = r.headers.get('content-type') || 'image/jpeg';
-              const buffer = Buffer.from(await r.arrayBuffer());
-              const base64 = buffer.toString('base64');
-              imageInput = { mimeType, base64 };
-            } catch (e) {
-              console.warn('Failed to fetch mockup image, proceeding without it:', e?.message || e);
-            }
+          // Aspect Ratio
+          let aspectRatio = null;
+          if (bp.aspectRatio && allowedRatios.includes(bp.aspectRatio)) {
+             aspectRatio = bp.aspectRatio;
+             parts.push(`Target aspect ratio: ${bp.aspectRatio}.`);
           }
 
-          // Best-effort: Optional logo image as a second media input
-          if (logoUrl) {
-            try {
-              const r = await fetch(logoUrl);
-              const mimeType = r.headers.get('content-type') || 'image/jpeg';
-              const buffer = Buffer.from(await r.arrayBuffer());
-              const base64 = buffer.toString('base64');
-              logoInput = { mimeType, base64 };
-            } catch (e) {
-              console.warn('Failed to fetch logo image, proceeding without it:', e?.message || e);
-            }
+          parts.push('GENERAL RULES: Preserve the overall layout, composition, and visual hierarchy of the original design. Do not remove or drastically move major visual elements unless explicitly requested.');
+
+          const fullPrompt = parts.join('\n');
+
+          // Prepare Media
+          const promptArray = [];
+          
+          // 1. Cropped Image
+          const mime = croppedImageMimeType || 'image/png';
+          promptArray.push({
+             media: {
+                url: `data:${mime};base64,${croppedImageBase64}`,
+                contentType: mime
+             }
+          });
+
+          // 2. Logo (if needed)
+          if (logoUrlToFetch) {
+             try {
+                const logoResp = await fetch(logoUrlToFetch);
+                if (logoResp.ok) {
+                   const logoBuf = await logoResp.arrayBuffer();
+                   const logoBase64 = Buffer.from(logoBuf).toString('base64');
+                   const logoMime = logoResp.headers.get('content-type') || 'image/png';
+                   promptArray.push({
+                      media: {
+                         url: `data:${logoMime};base64,${logoBase64}`,
+                         contentType: logoMime
+                      }
+                   });
+                }
+             } catch (e) {
+                console.warn('Failed to fetch brand logo:', e);
+             }
           }
+
+          promptArray.push({ text: fullPrompt });
+
+          console.log('--- GEMINI PROMPT START ---');
+          console.log(fullPrompt);
+          console.log('--- GEMINI PROMPT END ---');
 
           // Use Genkit to generate an image with Gemini 2.5 Flash Image
           let media, rawResponse;
-          if (imageInput || logoInput) {
-            const promptArray = [];
-            if (imageInput) {
-              const dataUrl = `data:${imageInput.mimeType};base64,${imageInput.base64}`;
-              promptArray.push({ media: { contentType: imageInput.mimeType, url: dataUrl } });
-            }
-            if (logoInput) {
-              const logoDataUrl = `data:${logoInput.mimeType};base64,${logoInput.base64}`;
-              promptArray.push({ media: { contentType: logoInput.mimeType, url: logoDataUrl } });
-            }
-            const enhancedPrompt = `Based on the provided reference image, ${fullPrompt}. Keep the composition and style similar to the reference image.`;
-            promptArray.push({ text: enhancedPrompt });
-
-            try {
-              ({ media, rawResponse } = await ai.generate({
-                model: googleAI.model('gemini-3-pro-image-preview'),
-                prompt: promptArray,
-                config: {
-                  responseModalities: ['IMAGE'],
-                  ...(aspectRatio ? { imageConfig: { aspectRatio } } : {}),
-                },
-                output: { format: 'media' },
-              }));
-            } catch (primaryErr) {
-              console.warn(
-                'Primary model failed, falling back to gemini-2.5-flash-image:',
-                primaryErr?.message || primaryErr,
-              );
-              ({ media, rawResponse } = await ai.generate({
-                model: googleAI.model('gemini-2.5-flash-image'),
-                prompt: promptArray,
-                config: {
-                  responseModalities: ['IMAGE'],
-                  ...(aspectRatio ? { imageConfig: { aspectRatio } } : {}),
-                },
-                output: { format: 'media' },
-              }));
-            }
-          } else {
-            try {
-              ({ media, rawResponse } = await ai.generate({
-                model: googleAI.model('gemini-3-pro-image-preview'),
-                prompt: fullPrompt,
-                config: {
-                  responseModalities: ['IMAGE'],
-                  ...(aspectRatio ? { imageConfig: { aspectRatio } } : {}),
-                },
-                output: { format: 'media' },
-              }));
-            } catch (primaryErr) {
-              console.warn(
-                'Primary model failed, falling back to gemini-2.5-flash-image:',
-                primaryErr?.message || primaryErr,
-              );
-              ({ media, rawResponse } = await ai.generate({
-                model: googleAI.model('gemini-2.5-flash-image'),
-                prompt: fullPrompt,
-                config: {
-                  responseModalities: ['IMAGE'],
-                  ...(aspectRatio ? { imageConfig: { aspectRatio } } : {}),
-                },
-                output: { format: 'media' },
-              }));
-            }
+          try {
+            ({ media, rawResponse } = await ai.generate({
+              model: googleAI.model('gemini-3-pro-image-preview'),
+              prompt: promptArray,
+              config: {
+                responseModalities: ['IMAGE'],
+                ...(aspectRatio ? { imageConfig: { aspectRatio } } : {}),
+              },
+              output: { format: 'media' },
+            }));
+          } catch (primaryErr) {
+            console.warn(
+              'Primary model failed, falling back to gemini-2.5-flash-image:',
+              primaryErr?.message || primaryErr,
+            );
+            ({ media, rawResponse } = await ai.generate({
+              model: googleAI.model('gemini-2.5-flash-image'),
+              prompt: promptArray,
+              config: {
+                responseModalities: ['IMAGE'],
+                ...(aspectRatio ? { imageConfig: { aspectRatio } } : {}),
+              },
+              output: { format: 'media' },
+            }));
           }
 
           // Genkit may return media as an array or a single object. Normalize it.
@@ -943,16 +971,14 @@ const getFlows = (() => {
                 type: 'generated',
                 ownerId: ownerId || null,
                 createdAt: FieldValue.serverTimestamp(),
-                prompt,
-                style: style || null,
+                prompt: fullPrompt,
+                style: null,
                 aspectRatio: aspectRatio || null,
-                mockupImageUrl: mockupImageUrl || null,
+                mockupImageUrl: null,
                 mimeType,
                 downloadUrl,
                 modelVersion: rawResponse?.modelVersion || null,
                 size: buffer.length,
-                //templateId: templateId || null,
-                //cropRect: cropRect || null
               });
             if (ownerId) {
               await db.collection('users').doc(ownerId).collection('generated').doc(id).set({
