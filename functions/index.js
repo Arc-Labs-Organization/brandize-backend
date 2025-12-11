@@ -16,6 +16,17 @@ const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 const { randomUUID } = require('crypto');
 const JSZip = require('jszip');
 const Busboy = require('busboy');
+// Support both busboy export styles and versions (constructor vs function)
+function createMultipartParser(headers) {
+  const lib = Busboy;
+  const Ctor = (lib && (lib.Busboy || lib.default || lib)) || lib;
+  try {
+    return new Ctor({ headers });
+  } catch (e) {
+    // Some versions export a callable function instead of a class
+    return Ctor({ headers });
+  }
+}
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
@@ -1137,7 +1148,7 @@ exports.generateSmartBlueprint = onRequest(
         return res.status(400).json({ error: 'Content-Type must be multipart/form-data' });
       }
 
-      const busboy = Busboy({ headers: req.headers });
+      const busboy = createMultipartParser(req.headers);
       const fields = {};
       let imageBuffer = null;
 
@@ -1250,7 +1261,7 @@ exports.addBrand = onRequest(
       try {
         if (req.headers['content-type'] && req.headers['content-type'].includes('multipart/form-data')) {
           console.log('Processing multipart request for addBrand');
-          const busboy = Busboy({ headers: req.headers });
+          const busboy = createMultipartParser(req.headers);
           const fields = {};
           const writes = [];
 
