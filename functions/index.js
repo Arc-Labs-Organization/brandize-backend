@@ -35,3 +35,8 @@ exports.freepikDownload = freepikDownload;
 const { generateImage, generateSmartBlueprint } = require('./src/tools/rebrand');
 exports.generateImage = generateImage;
 exports.generateSmartBlueprint = generateSmartBlueprint;
+
+// Import and export Change Text Tool
+const { extractTexts, generateImage2 } = require('./src/tools/changeText');
+exports.extractTexts = extractTexts;
+exports.generateImage2 = generateImage2;
