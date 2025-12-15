@@ -74,9 +74,9 @@ async function getRebrandFlows() {
     '21:9',
   ];
 
-  const generateImageFlow = flow(
+  const generateRebrandFlow = flow(
     {
-      name: 'generateImage',
+      name: 'generateRebrand',
       inputSchema: z.object({
         uid: z.string().min(1),
         brand: z.record(z.any()).optional(),
@@ -563,11 +563,11 @@ async function getRebrandFlows() {
     },
   );
 
-  rebrandFlows = { generateImageFlow, generateSmartBlueprintFlow };
+  rebrandFlows = { generateRebrandFlow, generateSmartBlueprintFlow };
   return rebrandFlows;
 }
 
-exports.generateImage = onRequest(
+exports.generateRebrand = onRequest(
   {
     region: 'europe-west1',
     timeoutSeconds: 120,
@@ -655,8 +655,8 @@ exports.generateImage = onRequest(
 
         const croppedImageBase64 = imageBuffer.toString('base64');
 
-        const { generateImageFlow } = await getRebrandFlows();
-        const result = await generateImageFlow({
+        const { generateRebrandFlow } = await getRebrandFlows();
+        const result = await generateRebrandFlow({
           uid,
           brand: brandData,
           blueprint: parsedBlueprint,
@@ -671,7 +671,7 @@ exports.generateImage = onRequest(
             .status(400)
             .json({ error: 'Invalid input', details: err.issues || String(err) });
         }
-        console.error('generateImage error:', err);
+        console.error('generateRebrand error:', err);
         return res
           .status(500)
           .json({ error: 'Internal error generating image', details: String(err.message || err) });

@@ -32,8 +32,8 @@ exports.freepikSearch = freepikSearch;
 exports.freepikDownload = freepikDownload;
 
 // Import and export Rebrand Tool Operations (Image Generation & Blueprinting)
-const { generateImage, generateSmartBlueprint } = require('./src/tools/rebrand');
-exports.generateImage = generateImage;
+const { generateRebrand, generateSmartBlueprint } = require('./src/tools/rebrand');
+exports.generateRebrand = generateRebrand;
 exports.generateSmartBlueprint = generateSmartBlueprint;
 
 // Import and export Change Text Tool
