@@ -33,6 +33,9 @@ async function getAddObjectFlows() {
 				objectImageBase64: z.string(),
 				objectImageMimeType: z.string().optional(),
 				objectLocation: z.string().min(1),
+				objectBox: z
+					.object({ left: z.number().nonnegative(), top: z.number().nonnegative(), width: z.number().positive(), height: z.number().positive() })
+					.optional(),
 				aspectRatio: z.string().optional(),
 			}),
 			outputSchema: z.object({
@@ -50,14 +53,128 @@ async function getAddObjectFlows() {
 			objectImageBase64,
 			objectImageMimeType,
 			objectLocation,
+			objectBox,
 			aspectRatio,
 		}) => {
 			await ensureUserExists(uid);
 			await decrementUsage(uid, 'generate');
 
+			// Path A: deterministic composite when objectBox is provided
+			if (objectBox && typeof objectBox.left === 'number' && typeof objectBox.top === 'number' && typeof objectBox.width === 'number' && typeof objectBox.height === 'number') {
+				const sharp = require('sharp');
+				const baseBuf = Buffer.from(croppedImageBase64, 'base64');
+				const objBuf = Buffer.from(objectImageBase64, 'base64');
+
+				const baseImg = sharp(baseBuf, { unlimited: true });
+				const meta = await baseImg.metadata();
+				const canvasW = meta.width || 0;
+				const canvasH = meta.height || 0;
+
+				const targetW = Math.max(1, Math.round(objectBox.width));
+				const targetH = Math.max(1, Math.round(objectBox.height));
+				const objResized = await sharp(objBuf, { unlimited: true })
+					.resize(targetW, targetH, { fit: 'cover', position: 'centre' })
+					.png()
+					.toBuffer();
+
+				const left = Math.max(0, Math.round(objectBox.left));
+				const top = Math.max(0, Math.round(objectBox.top));
+
+				const outBuffer = await baseImg
+					.resize(canvasW, canvasH, { fit: 'fill' })
+					.composite([{ input: objResized, left, top }])
+					.png()
+					.toBuffer();
+
+				const id = randomUUID();
+				const imagePath = buildGeneratedImagePath(uid, id, 'png');
+
+				const appOptions = admin.app().options || {};
+				const configuredBucket = appOptions.storageBucket;
+				const projId = process.env.GCLOUD_PROJECT || process.env.GCP_PROJECT;
+				const bucketName = configuredBucket || (projId ? `${projId}.appspot.com` : undefined);
+				const bucket = bucketName ? admin.storage().bucket(bucketName) : admin.storage().bucket();
+
+				let file = null;
+				let downloadToken = null;
+				try {
+					const [bucketExists] = await bucket.exists();
+					if (bucketExists) {
+						file = bucket.file(imagePath);
+						downloadToken = randomUUID();
+						await file.save(outBuffer, {
+							resumable: false,
+							contentType: 'image/png',
+							metadata: {
+								cacheControl: 'public, max-age=31536000',
+								metadata: { firebaseStorageDownloadTokens: downloadToken },
+							},
+						});
+					}
+				} catch (_) {
+					file = null;
+				}
+
+				let downloadUrl = null;
+				if (file) {
+					try {
+						const [url] = await file.getSignedUrl({
+							action: 'read',
+							expires: new Date(Date.now() + 1000 * 60 * 60 * 24 * 365),
+						});
+						downloadUrl = url;
+					} catch (e) {
+						try {
+							const [metadata] = await file.getMetadata().catch(() => [{}]);
+							let token = metadata?.metadata?.firebaseStorageDownloadTokens;
+							if (!token) {
+								token = downloadToken || randomUUID();
+								await file.setMetadata({ metadata: { firebaseStorageDownloadTokens: token } }).catch(() => {});
+							}
+							downloadUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(imagePath)}?alt=media&token=${token}`;
+						} catch (_) {
+							downloadUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(imagePath)}?alt=media`;
+						}
+					}
+				}
+
+				try {
+					await db.collection('images').doc(id).set({
+						storagePath: imagePath,
+						type: 'generated',
+						ownerId: uid || null,
+						createdAt: FieldValue.serverTimestamp(),
+						prompt: 'deterministic_add_object_sharp',
+						style: null,
+						aspectRatio: `${canvasW}:${canvasH}`,
+						mockupImageUrl: null,
+						mimeType: 'image/png',
+						downloadUrl,
+						modelVersion: null,
+						size: outBuffer.length,
+					});
+					await db.collection('users').doc(uid).collection('generated').doc(id).set({
+						createdAt: FieldValue.serverTimestamp(),
+						imageId: id,
+						storagePath: imagePath,
+						type: 'generated',
+					});
+				} catch (_) {}
+
+				return {
+					mimeType: 'image/png',
+					id,
+					storagePath: imagePath,
+					downloadUrl,
+					generated_img_url: downloadUrl,
+				};
+			}
+
+			// Path B: Gemini fallback with canvas lock
 			const parts = [];
 			parts.push('Task: In the first image (template crop), ADD the object from the second image at the specified location.');
 			parts.push('STRICT RULES (follow precisely):');
+			parts.push('- Canvas lock: OUTPUT WIDTH and HEIGHT MUST MATCH the FIRST IMAGE exactly. No padding, borders, whitespace, or re-layout.');
 			parts.push('- Placement: Place the object centered within the specified target location. Do not shift unrelated elements.');
 			parts.push('- Fit strategy: COVER the target region with the object; allow slight overfill to avoid borders.');
 			parts.push('- Scale: Match natural scale consistent with surrounding context.');
@@ -79,13 +196,42 @@ async function getAddObjectFlows() {
 			];
 
 			let media, rawResponse;
+			// Derive aspect ratio from base image if not provided
+			let derivedAspect = aspectRatio;
+			try {
+				if (!derivedAspect) {
+					const sharp = require('sharp');
+					const baseBufForAspect = Buffer.from(croppedImageBase64, 'base64');
+					const meta = await sharp(baseBufForAspect).metadata();
+					const w = meta.width || 0;
+					const h = meta.height || 0;
+					if (w > 0 && h > 0) {
+						const ratio = w / h;
+						const candidates = [
+							{ r: 1, label: '1:1' },
+							{ r: 16 / 9, label: '16:9' },
+							{ r: 4 / 3, label: '4:3' },
+							{ r: 3 / 2, label: '3:2' },
+							{ r: 9 / 16, label: '9:16' },
+						];
+						let best = candidates[0];
+						let bestDiff = Math.abs(ratio - best.r);
+						for (const c of candidates) {
+							const d = Math.abs(ratio - c.r);
+							if (d < bestDiff) { best = c; bestDiff = d; }
+						}
+						derivedAspect = best.label;
+						console.log('Canvas lock base size:', w, h, 'derived aspect:', derivedAspect);
+					}
+				}
+			} catch (_) {}
 			try {
 				({ media, rawResponse } = await ai.generate({
 					model: googleAI.model('gemini-3-pro-image-preview'),
 					prompt: promptArray,
 					config: {
 						responseModalities: ['IMAGE'],
-						...(aspectRatio ? { imageConfig: { aspectRatio } } : {}),
+						...(derivedAspect ? { imageConfig: { aspectRatio: derivedAspect } } : {}),
 					},
 					output: { format: 'media' },
 				}));
@@ -95,7 +241,7 @@ async function getAddObjectFlows() {
 					prompt: promptArray,
 					config: {
 						responseModalities: ['IMAGE'],
-						...(aspectRatio ? { imageConfig: { aspectRatio } } : {}),
+						...(derivedAspect ? { imageConfig: { aspectRatio: derivedAspect } } : {}),
 					},
 					output: { format: 'media' },
 				}));
@@ -111,6 +257,8 @@ async function getAddObjectFlows() {
 			let mimeType = 'image/png';
 			try {
 				const sharp = require('sharp');
+				const outMeta = await sharp(buffer).metadata();
+				console.log('Model output size:', outMeta.width, outMeta.height);
 				buffer = await sharp(buffer, { unlimited: true }).png().toBuffer();
 				mimeType = 'image/png';
 			} catch (_) {
