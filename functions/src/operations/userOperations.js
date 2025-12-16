@@ -86,7 +86,7 @@ async function decrementUsage(uid, usageType) {
  * GET /api/user/downloads
  * Returns: { downloads: Array }
  */
-const getDownloaded = onRequest(
+const getDownloadedImages = onRequest(
   {
     region: 'europe-west1',
     cors: true,
@@ -160,7 +160,7 @@ const getDownloaded = onRequest(
  * GET /api/user/created
  * Returns: { created: Array }
  */
-const getCreated = onRequest(
+const getCreatedImages = onRequest(
   {
     region: 'europe-west1',
     cors: true,
@@ -228,4 +228,4 @@ const getCreated = onRequest(
   },
 );
 
-module.exports = { ensureUserExists, decrementUsage, getDownloaded, getCreated };
+module.exports = { ensureUserExists, decrementUsage, getDownloadedImages, getCreatedImages };
