@@ -3,7 +3,7 @@ const cors = require('cors')({ origin: true });
 const admin = require('firebase-admin');
 const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 const { randomUUID } = require('crypto');
-const { createMultipartParser, buildGeneratedImagePath } = require('../common/utils');
+const { createMultipartParser, buildGeneratedImagePath, verifyAuth } = require('../common/utils');
 const { ensureUserExists, decrementUsage } = require('../operations/userOperations');
 const { initGenkit, GOOGLE_API_KEY } = require('../common/genkit');
 
@@ -589,6 +589,13 @@ exports.generateImage = onRequest(
         return res.status(405).json({ error: 'Method not allowed. Use POST.' });
       }
 
+      let uid;
+      try {
+        uid = await verifyAuth(req);
+      } catch (e) {
+        return res.status(401).json({ error: e.message });
+      }
+
       // Check for multipart/form-data
       if (!req.headers['content-type'] || !req.headers['content-type'].includes('multipart/form-data')) {
         return res.status(400).json({ error: 'Content-Type must be multipart/form-data' });
@@ -628,10 +635,10 @@ exports.generateImage = onRequest(
           }
         });
 
-        const { uid, brand_id, blueprint } = fields;
+        const { brand_id, blueprint } = fields;
 
-        if (!uid || !brand_id || !blueprint) {
-          return res.status(400).json({ error: 'Missing required fields: uid, brand_id, blueprint' });
+        if (!brand_id || !blueprint) {
+          return res.status(400).json({ error: 'Missing required fields: brand_id, blueprint' });
         }
 
         if (!imageBuffer) {
@@ -700,6 +707,13 @@ exports.generateSmartBlueprint = onRequest(
         return res.status(405).json({ error: 'Method not allowed. Use POST.' });
       }
 
+      let user_id;
+      try {
+        user_id = await verifyAuth(req);
+      } catch (e) {
+        return res.status(401).json({ error: e.message });
+      }
+
       // Check for multipart/form-data
       if (!req.headers['content-type'] || !req.headers['content-type'].includes('multipart/form-data')) {
         return res.status(400).json({ error: 'Content-Type must be multipart/form-data' });
@@ -737,10 +751,10 @@ exports.generateSmartBlueprint = onRequest(
           }
         });
 
-        const { user_id, brand_id, updateFields } = fields;
+        const { brand_id, updateFields } = fields;
 
-        if (!user_id || !brand_id || !updateFields) {
-          return res.status(400).json({ error: 'Missing required fields: user_id, brand_id, updateFields' });
+        if (!brand_id || !updateFields) {
+          return res.status(400).json({ error: 'Missing required fields: brand_id, updateFields' });
         }
 
         if (!imageBuffer) {

@@ -7,7 +7,7 @@ const Busboy = require('busboy');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { createMultipartParser } = require('../common/utils');
+const { createMultipartParser, verifyAuth } = require('../common/utils');
 
 try {
   if (!admin.apps.length) {
@@ -42,6 +42,12 @@ exports.addBrand = onRequest(
       }
 
       let user_id;
+      try {
+        user_id = await verifyAuth(req);
+      } catch (e) {
+        return res.status(401).json({ success: false, error: e.message });
+      }
+
       let brandInfo;
       let logoFile = null;
 
@@ -95,7 +101,7 @@ exports.addBrand = onRequest(
             }
           });
 
-          user_id = fields.user_id;
+          // user_id is now derived from token
           try {
             brandInfo = fields.brandInfo ? JSON.parse(fields.brandInfo) : null;
           } catch (e) {
@@ -103,13 +109,10 @@ exports.addBrand = onRequest(
           }
         } else {
           console.log('Processing JSON request for addBrand');
-          user_id = req.body.user_id;
+          // user_id = req.body.user_id; // Removed
           brandInfo = req.body.brandInfo;
         }
 
-        if (!user_id || typeof user_id !== 'string') {
-          return res.status(400).json({ success: false, error: 'Missing required field: user_id' });
-        }
         if (!brandInfo || typeof brandInfo !== 'object') {
           return res.status(400).json({ success: false, error: 'Missing required field: brandInfo' });
         }
@@ -214,6 +217,12 @@ exports.updateBrand = onRequest(
       }
 
       let user_id;
+      try {
+        user_id = await verifyAuth(req);
+      } catch (e) {
+        return res.status(401).json({ success: false, error: e.message });
+      }
+
       let brand_id;
       let brandInfo = {};
       let logoFile = null;
@@ -258,7 +267,7 @@ exports.updateBrand = onRequest(
             }
           });
 
-          user_id = fields.user_id;
+          // user_id = fields.user_id; // Removed
           brand_id = fields.brand_id;
           if (fields.brandInfo) {
             try {
@@ -268,14 +277,11 @@ exports.updateBrand = onRequest(
             }
           }
         } else {
-          user_id = req.body.user_id;
+          // user_id = req.body.user_id; // Removed
           brand_id = req.body.brand_id;
           brandInfo = req.body.brandInfo || {};
         }
 
-        if (!user_id || typeof user_id !== 'string') {
-          return res.status(400).json({ success: false, error: 'Missing required field: user_id' });
-        }
         if (!brand_id || typeof brand_id !== 'string') {
           return res.status(400).json({ success: false, error: 'Missing required field: brand_id' });
         }
@@ -381,13 +387,16 @@ exports.deleteBrand = onRequest(
         return res.status(405).json({ success: false, error: 'Method not allowed. Use DELETE.' });
       }
       try {
+        let user_id;
+        try {
+          user_id = await verifyAuth(req);
+        } catch (e) {
+          return res.status(401).json({ success: false, error: e.message });
+        }
+
         // Support both body (if client sends it) and query params (standard for DELETE)
-        const user_id = (req.body?.user_id || req.query?.user_id);
         const brand_id = (req.body?.brand_id || req.query?.brand_id);
 
-        if (!user_id || typeof user_id !== 'string') {
-          return res.status(400).json({ success: false, error: 'Missing required field: user_id' });
-        }
         if (!brand_id || typeof brand_id !== 'string') {
           return res.status(400).json({ success: false, error: 'Missing required field: brand_id' });
         }
@@ -441,10 +450,11 @@ exports.getBrands = onRequest(
       }
 
       try {
-        const user_id = (req.query.user_id || '').toString().trim();
-
-        if (!user_id) {
-          return res.status(400).json({ success: false, error: 'Missing required query parameter: user_id' });
+        let user_id;
+        try {
+          user_id = await verifyAuth(req);
+        } catch (e) {
+          return res.status(401).json({ success: false, error: e.message });
         }
 
         const brandsSnapshot = await db

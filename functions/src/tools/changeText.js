@@ -3,7 +3,7 @@ const cors = require('cors')({ origin: true });
 const admin = require('firebase-admin');
 const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 const { randomUUID } = require('crypto');
-const { createMultipartParser, buildGeneratedImagePath } = require('../common/utils');
+const { createMultipartParser, buildGeneratedImagePath, verifyAuth } = require('../common/utils');
 const { ensureUserExists, decrementUsage } = require('../operations/userOperations');
 const { initGenkit, GOOGLE_API_KEY } = require('../common/genkit');
 
@@ -347,6 +347,14 @@ exports.extractTexts = onRequest(
 
     return cors(req, res, async () => {
       if (req.method !== 'POST') return res.status(405).json({ error: 'Method Not Allowed' });
+      
+      let uid;
+      try {
+        uid = await verifyAuth(req);
+      } catch (e) {
+        return res.status(401).json({ error: e.message });
+      }
+
       try {
         const { extractTexts } = await getChangeTextFlows();
 
@@ -382,10 +390,10 @@ exports.extractTexts = onRequest(
             }
           });
 
-          const uid = String(fields.uid || '').trim();
+          // const uid = String(fields.uid || '').trim(); // Removed
           const targetAudience = String(fields.targetAudience || fields.audience || '').trim();
-          if (!uid || !imageBuffer) {
-              return res.status(400).json({ error: 'Missing required fields: uid, croppedImage' });
+          if (!imageBuffer) {
+              return res.status(400).json({ error: 'Missing required fields: croppedImage' });
           }
 
           const out = await extractTexts({
@@ -399,11 +407,11 @@ exports.extractTexts = onRequest(
 
         // Fallback: JSON body with base64
         const body = req.body || {};
-        const uid = String(body.uid || '').trim();
+        // const uid = String(body.uid || '').trim(); // Removed
         const base64 = body.croppedImageBase64 || body.croppedimage;
         const targetAudience = String(body.targetAudience || body.audience || '').trim();
-        if (!uid || !base64) {
-          return res.status(400).json({ error: 'Missing required fields: uid, croppedImageBase64' });
+        if (!base64) {
+          return res.status(400).json({ error: 'Missing required fields: croppedImageBase64' });
         }
         const out = await extractTexts({
           uid,
@@ -438,6 +446,14 @@ exports.generateImage2 = onRequest(
 
     return cors(req, res, async () => {
       if (req.method !== 'POST') return res.status(405).json({ error: 'Method Not Allowed' });
+      
+      let uid;
+      try {
+        uid = await verifyAuth(req);
+      } catch (e) {
+        return res.status(401).json({ error: e.message });
+      }
+
       try {
         const { generateImage2 } = await getChangeTextFlows();
 
@@ -472,10 +488,10 @@ exports.generateImage2 = onRequest(
             }
           });
 
-          const uid = String(fields.uid || '').trim();
+          // const uid = String(fields.uid || '').trim(); // Removed
           const bpText = fields.blueprint || fields.blueprintText;
-          if (!uid || !bpText || !imageBuffer) {
-            return res.status(400).json({ error: 'Missing required fields: uid, blueprint, croppedImage' });
+          if (!bpText || !imageBuffer) {
+            return res.status(400).json({ error: 'Missing required fields: blueprint, croppedImage' });
           }
           let blueprint;
           try {
@@ -495,9 +511,9 @@ exports.generateImage2 = onRequest(
 
         // Fallback: JSON body with base64
         const body = req.body || {};
-        const uid = String(body.uid || '').trim();
-        if (!uid || !body.blueprint || !(body.croppedImageBase64 || body.croppedImage)) {
-          return res.status(400).json({ error: 'Missing required fields: uid, blueprint, croppedImageBase64' });
+        // const uid = String(body.uid || '').trim(); // Removed
+        if (!body.blueprint || !(body.croppedImageBase64 || body.croppedImage)) {
+          return res.status(400).json({ error: 'Missing required fields: blueprint, croppedImageBase64' });
         }
         const blueprint = typeof body.blueprint === 'string' ? JSON.parse(body.blueprint) : body.blueprint;
         const out = await generateImage2({

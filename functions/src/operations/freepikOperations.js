@@ -5,7 +5,7 @@ const admin = require('firebase-admin');
 const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 const { randomUUID } = require('crypto');
 const JSZip = require('jszip');
-const { buildCommonImagePath } = require('../common/utils');
+const { buildCommonImagePath, verifyAuth } = require('../common/utils');
 const { ensureUserExists, decrementUsage } = require('./userOperations');
 
 try {
@@ -48,6 +48,22 @@ exports.freepikSearch = onRequest(
     }
 
     return cors(req, res, async () => {
+      // Authentication check
+      const authHeader = req.headers.authorization;
+      if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        console.error('Missing or invalid Authorization header');
+        return res.status(401).send('Unauthorized');
+      }
+
+      const idToken = authHeader.split('Bearer ')[1];
+      try {
+        const decodedToken = await admin.auth().verifyIdToken(idToken);
+        console.log('User authenticated:', decodedToken.uid);
+      } catch (error) {
+        console.error('Error verifying ID token:', error);
+        return res.status(401).send('Unauthorized');
+      }
+
       if (req.method !== 'GET') {
         return res.status(405).json({ error: 'Method not allowed. Use GET.' });
       }
@@ -192,11 +208,16 @@ exports.freepikDownload = onRequest(
         return res.status(405).json({ error: 'Method not allowed. Use GET.' });
       }
 
+      let uid;
+      try {
+        uid = await verifyAuth(req);
+      } catch (e) {
+        return res.status(401).json({ error: e.message });
+      }
+
       const resourceId = (req.query.resourceId || '').toString().trim();
-      const uid = (req.query.uid || '').toString().trim();
       if (!resourceId)
         return res.status(400).json({ error: 'Missing required query parameter: resourceId' });
-      if (!uid) return res.status(400).json({ error: 'Missing required query parameter: uid' });
 
       if (!process.env.FREEPIK_API_KEY) {
         return res.status(500).json({ error: 'FREEPIK_API_KEY not configured on server' });

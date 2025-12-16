@@ -1,4 +1,5 @@
 const Busboy = require('busboy');
+const admin = require('firebase-admin');
 
 // Support both busboy export styles and versions (constructor vs function)
 function createMultipartParser(headers) {
@@ -20,4 +21,19 @@ function buildGeneratedImagePath(uid, imageId, ext) {
   return `images/generated/${uid}/${imageId}.${ext}`;
 }
 
-module.exports = { createMultipartParser, buildCommonImagePath, buildGeneratedImagePath };
+async function verifyAuth(req) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    throw new Error('Unauthorized: Missing or invalid Authorization header');
+  }
+  const idToken = authHeader.split('Bearer ')[1];
+  try {
+    const decodedToken = await admin.auth().verifyIdToken(idToken);
+    return decodedToken.uid;
+  } catch (error) {
+    console.error('Error verifying ID token:', error);
+    throw new Error('Unauthorized: Invalid ID token');
+  }
+}
+
+module.exports = { createMultipartParser, buildCommonImagePath, buildGeneratedImagePath, verifyAuth };
