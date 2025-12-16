@@ -42,5 +42,6 @@ exports.extractTexts = extractTexts;
 exports.generateChangeText = generateChangeText;
 
 // Import and export User Operations
-const { getDownloaded } = require('./src/operations/userOperations');
+const { getDownloaded, getCreated } = require('./src/operations/userOperations');
 exports.getDownloaded = getDownloaded;
+exports.getCreated = getCreated;

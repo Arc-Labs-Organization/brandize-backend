@@ -155,4 +155,77 @@ const getDownloaded = onRequest(
   },
 );
 
-module.exports = { ensureUserExists, decrementUsage, getDownloaded };
+/**
+ * Get user's generated (created) images.
+ * GET /api/user/created
+ * Returns: { created: Array }
+ */
+const getCreated = onRequest(
+  {
+    region: 'europe-west1',
+    cors: true,
+  },
+  async (req, res) => {
+    // Handle CORS preflight
+    if (req.method === 'OPTIONS') {
+      res.set('Access-Control-Allow-Origin', '*');
+      res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
+      res.set('Access-Control-Allow-Headers', 'Content-Type');
+      return res.status(204).send('');
+    }
+
+    return cors(req, res, async () => {
+      if (req.method !== 'GET') {
+        return res.status(405).json({ error: 'Method not allowed. Use GET.' });
+      }
+
+      let uid;
+      try {
+        uid = await verifyAuth(req);
+      } catch (e) {
+        return res.status(401).json({ error: e.message });
+      }
+
+      try {
+        const createdSnapshot = await db
+          .collection('users')
+          .doc(uid)
+          .collection('generated')
+          .orderBy('createdAt', 'desc')
+          .get();
+
+        if (createdSnapshot.empty) {
+          return res.status(200).json({ created: [] });
+        }
+
+        const createdPromises = createdSnapshot.docs.map(async (doc) => {
+          const data = doc.data();
+          const imageId = data.imageId;
+
+          // Fetch image details from images collection to get the URL
+          const imageDoc = await db.collection('images').doc(imageId).get();
+          if (imageDoc.exists) {
+            const imageData = imageDoc.data();
+            return {
+              ...data,
+              downloadUrl: imageData.downloadUrl,
+              mimeType: imageData.mimeType,
+              size: imageData.size,
+              prompt: imageData.prompt,
+              aspectRatio: imageData.aspectRatio,
+            };
+          }
+          return data;
+        });
+
+        const created = await Promise.all(createdPromises);
+        return res.status(200).json({ created });
+      } catch (error) {
+        console.error('Error fetching created images:', error);
+        return res.status(500).json({ error: 'Internal Server Error', details: error.message });
+      }
+    });
+  },
+);
+
+module.exports = { ensureUserExists, decrementUsage, getDownloaded, getCreated };
