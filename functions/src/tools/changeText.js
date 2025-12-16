@@ -137,9 +137,9 @@ async function getChangeTextFlows() {
     }
   );
 
-  const generateImage2 = flow(
+  const generateChangeText = flow(
     {
-      name: 'generateImage2',
+      name: 'generateChangeText',
       inputSchema: z.object({
         uid: z.string().min(1),
         blueprint: z.record(z.any()),
@@ -325,7 +325,7 @@ async function getChangeTextFlows() {
     }
   );
 
-  flows = { extractTexts, generateImage2 };
+  flows = { extractTexts, generateChangeText };
   return flows;
 }
 
@@ -428,7 +428,7 @@ exports.extractTexts = onRequest(
   }
 );
 
-exports.generateImage2 = onRequest(
+exports.generateChangeText = onRequest(
   {
     region: 'europe-west1',
     timeoutSeconds: 120,
@@ -455,7 +455,7 @@ exports.generateImage2 = onRequest(
       }
 
       try {
-        const { generateImage2 } = await getChangeTextFlows();
+        const { generateChangeText } = await getChangeTextFlows();
 
         if (req.headers['content-type'] && req.headers['content-type'].includes('multipart/form-data')) {
           const busboy = createMultipartParser(req.headers);
@@ -500,7 +500,7 @@ exports.generateImage2 = onRequest(
             return res.status(400).json({ error: 'Invalid blueprint JSON format' });
           }
 
-          const out = await generateImage2({
+          const out = await generateChangeText({
             uid,
             blueprint,
             croppedImageBase64: imageBuffer.toString('base64'),
@@ -516,7 +516,7 @@ exports.generateImage2 = onRequest(
           return res.status(400).json({ error: 'Missing required fields: blueprint, croppedImageBase64' });
         }
         const blueprint = typeof body.blueprint === 'string' ? JSON.parse(body.blueprint) : body.blueprint;
-        const out = await generateImage2({
+        const out = await generateChangeText({
           uid,
           blueprint,
           croppedImageBase64: body.croppedImageBase64 || body.croppedImage,
@@ -524,7 +524,7 @@ exports.generateImage2 = onRequest(
         });
         res.status(200).json(out);
       } catch (err) {
-        console.error('generateImage2 error:', err?.message || err);
+        console.error('generateChangeText error:', err?.message || err);
         res.status(500).json({ error: 'Internal Server Error' });
       }
     });
