@@ -45,6 +45,10 @@ exports.generateChangeText = generateChangeText;
 const { generateReplaceImage } = require('./src/tools/replaceImage');
 exports.generateReplaceImage = generateReplaceImage;
 
+// Import and export Add Object Tool
+const { generateAddObject } = require('./src/tools/addObject');
+exports.generateAddObject = generateAddObject;
+
 // Import and export User Operations
 const { getDownloadedImages, getCreatedImages } = require('./src/operations/userOperations');
 exports.getDownloadedImages = getDownloadedImages;
