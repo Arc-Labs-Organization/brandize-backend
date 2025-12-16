@@ -40,3 +40,7 @@ exports.generateSmartBlueprint = generateSmartBlueprint;
 const { extractTexts, generateChangeText } = require('./src/tools/changeText');
 exports.extractTexts = extractTexts;
 exports.generateChangeText = generateChangeText;
+
+// Import and export User Operations
+const { getDownloaded } = require('./src/operations/userOperations');
+exports.getDownloaded = getDownloaded;

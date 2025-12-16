@@ -1,5 +1,8 @@
 const admin = require('firebase-admin');
 const { getFirestore, FieldValue } = require('firebase-admin/firestore');
+const { onRequest } = require('firebase-functions/v2/https');
+const cors = require('cors')({ origin: true });
+const { verifyAuth } = require('../common/utils');
 
 try {
   if (!admin.apps.length) {
@@ -78,4 +81,78 @@ async function decrementUsage(uid, usageType) {
   });
 }
 
-module.exports = { ensureUserExists, decrementUsage };
+/**
+ * Get user's downloaded images.
+ * GET /api/user/downloads
+ * Returns: { downloads: Array }
+ */
+const getDownloaded = onRequest(
+  {
+    region: 'europe-west1',
+    cors: true,
+  },
+  async (req, res) => {
+    // Handle CORS preflight
+    if (req.method === 'OPTIONS') {
+      res.set('Access-Control-Allow-Origin', '*');
+      res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
+      res.set('Access-Control-Allow-Headers', 'Content-Type');
+      return res.status(204).send('');
+    }
+
+    return cors(req, res, async () => {
+      if (req.method !== 'GET') {
+        return res.status(405).json({ error: 'Method not allowed. Use GET.' });
+      }
+
+      let uid;
+      try {
+        uid = await verifyAuth(req);
+      } catch (e) {
+        return res.status(401).json({ error: e.message });
+      }
+
+      try {
+        const downloadsSnapshot = await db
+          .collection('users')
+          .doc(uid)
+          .collection('downloads')
+          .orderBy('createdAt', 'desc')
+          .get();
+
+        if (downloadsSnapshot.empty) {
+          return res.status(200).json({ downloads: [] });
+        }
+
+        const downloadPromises = downloadsSnapshot.docs.map(async (doc) => {
+          const data = doc.data();
+          const imageId = data.imageId;
+
+          // Fetch image details from images collection to get the URL
+          // We do this to ensure we get the latest signed URL or metadata
+          const imageDoc = await db.collection('images').doc(imageId).get();
+          if (imageDoc.exists) {
+            const imageData = imageDoc.data();
+            return {
+              ...data,
+              downloadUrl: imageData.downloadUrl,
+              originalDownloadUrl: imageData.originalDownloadUrl,
+              mimeType: imageData.mimeType,
+              size: imageData.size,
+              imageFileName: imageData.imageFileName,
+            };
+          }
+          return data;
+        });
+
+        const downloads = await Promise.all(downloadPromises);
+        return res.status(200).json({ downloads });
+      } catch (error) {
+        console.error('Error fetching downloads:', error);
+        return res.status(500).json({ error: 'Internal Server Error', details: error.message });
+      }
+    });
+  },
+);
+
+module.exports = { ensureUserExists, decrementUsage, getDownloaded };
