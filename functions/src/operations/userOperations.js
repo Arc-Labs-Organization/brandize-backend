@@ -30,10 +30,6 @@ async function ensureUserExists(uid) {
         download: 100, // default download limit
         generate: 100, // default generate limit
       },
-      brand: {
-        name: null,
-        website: null,
-      },
       createdAt: FieldValue.serverTimestamp(),
       lastUsedAt: FieldValue.serverTimestamp(),
     });
