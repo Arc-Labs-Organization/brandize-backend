@@ -27,22 +27,16 @@ async function getChangeTextFlows() {
     {
       name: 'extractTexts',
       inputSchema: z.object({
-        uid: z.string().min(1),
         croppedImageBase64: z.string(),
         croppedImageMimeType: z.string().optional(),
-        targetAudience: z.string().min(1),
       }),
       outputSchema: z.object({
         original_texts: z.array(z.string()),
         suggested_texts: z.array(z.string()),
       }),
     },
-    async ({ uid, croppedImageBase64, croppedImageMimeType, targetAudience }) => {
-      await ensureUserExists(uid);
-      await decrementUsage(uid, 'generate');
-
+    async ({ croppedImageBase64, croppedImageMimeType }) => {
       const mime = croppedImageMimeType || 'image/png';
-      const audience = (targetAudience || 'general consumer audience; modern, friendly, concise tone').trim();
       const prompt = [
         {
           media: {
@@ -52,16 +46,10 @@ async function getChangeTextFlows() {
         },
         {
           text: [
-            `You are rewriting visible marketing copy for target audience: ${audience}.`,
-            'Step 1: Extract ALL visible texts exactly as shown (preserve order).',
-            'Step 2: For EACH extracted line, produce a rewritten version tailored to the audience.',
-            'Constraints:',
-            '- Keep length within ±20% of original.',
-            '- Improve clarity, specificity, and actionability; avoid generic filler.',
-            '- Ensure wording changes meaningfully; do NOT return identical strings.',
-            '- Preserve casing/format where reasonable (e.g., headline uppercase).',
-            'Output: ONLY valid JSON object:',
-            '{"original_texts": ["..."], "suggested_texts": ["..."]}',
+            'Task: Extract ALL visible texts exactly as shown in the image (preserve order).',
+            'Do NOT rewrite or suggest alternatives. Only extract what is visibly present.',
+            'Output ONLY the following JSON object:',
+            '{"original_texts": ["..."]}',
           ].join('\n'),
         },
       ];
@@ -79,61 +67,12 @@ async function getChangeTextFlows() {
         parsed = JSON.parse(text);
       } catch (_) {
         const match = text.match(/\{[\s\S]*\}/);
-        parsed = match ? JSON.parse(match[0]) : { original_texts: [], suggested_texts: [] };
+        parsed = match ? JSON.parse(match[0]) : { original_texts: [] };
       }
 
       const original = Array.isArray(parsed.original_texts) ? parsed.original_texts : [];
-      let suggested = Array.isArray(parsed.suggested_texts) ? parsed.suggested_texts : [];
-
-      // Post-processing safeguards: ensure suggestions differ and respect ±20% length
-      const clamp = (s, minLen, maxLen) => {
-        if (!s) return s;
-        const trimmed = s.trim();
-        if (trimmed.length < minLen) {
-          return (trimmed + ' ').repeat(Math.ceil((minLen - trimmed.length) / 2)).trim().slice(0, minLen);
-        }
-        if (trimmed.length > maxLen) {
-          return trimmed.slice(0, maxLen);
-        }
-        return trimmed;
-      };
-      const tweakIfIdentical = (orig, sug) => {
-        if (!orig) return sug || '';
-        const o = String(orig).trim();
-        const s = String(sug || '').trim();
-        if (o.toLowerCase() !== s.toLowerCase()) return s;
-        // Apply simple transformations to encourage difference
-        const replacements = [
-          ['Shop', 'Discover'],
-          ['Sale', 'Offer'],
-          ['Now', 'Today'],
-          ['Get', 'Unlock'],
-          ['Join', 'Explore'],
-          ['Learn', 'See'],
-        ];
-        let out = s;
-        for (const [a, b] of replacements) {
-          const re = new RegExp(`\\b${a}\\b`, 'i');
-          if (re.test(out)) {
-            out = out.replace(re, b);
-            break;
-          }
-        }
-        if (out.toLowerCase() === o.toLowerCase()) {
-          out = `${s} — ${audience.split(/[;,]/)[0].trim()}`;
-        }
-        return out;
-      };
-
-      suggested = original.map((orig, i) => {
-        const sug = suggested[i] ?? '';
-        const minLen = Math.max(1, Math.floor(String(orig || '').length * 0.8));
-        const maxLen = Math.max(minLen, Math.ceil(String(orig || '').length * 1.2));
-        const tweaked = tweakIfIdentical(orig, sug);
-        return clamp(tweaked, minLen, maxLen);
-      });
-
-      return { original_texts: original, suggested_texts: suggested };
+      // Do not provide suggestions anymore; return empty array for compatibility
+      return { original_texts: original, suggested_texts: [] };
     }
   );
 
@@ -390,34 +329,36 @@ exports.extractTexts = onRequest(
             }
           });
 
-          // const uid = String(fields.uid || '').trim(); // Removed
-          const targetAudience = String(fields.targetAudience || fields.audience || '').trim();
           if (!imageBuffer) {
               return res.status(400).json({ error: 'Missing required fields: croppedImage' });
           }
 
+          // Perform user accounting here (not as input to the flow)
+          try {
+            await ensureUserExists(uid);
+            await decrementUsage(uid, 'generate');
+          } catch (_) {}
+
           const out = await extractTexts({
-            uid,
             croppedImageBase64: imageBuffer.toString('base64'),
             croppedImageMimeType: imageMimeType,
-            targetAudience: targetAudience || 'general consumer audience; modern, friendly, concise tone',
           });
           return res.status(200).json(out);
         }
 
         // Fallback: JSON body with base64
         const body = req.body || {};
-        // const uid = String(body.uid || '').trim(); // Removed
         const base64 = body.croppedImageBase64 || body.croppedimage;
-        const targetAudience = String(body.targetAudience || body.audience || '').trim();
         if (!base64) {
           return res.status(400).json({ error: 'Missing required fields: croppedImageBase64' });
         }
+        try {
+          await ensureUserExists(uid);
+          await decrementUsage(uid, 'generate');
+        } catch (_) {}
         const out = await extractTexts({
-          uid,
           croppedImageBase64: base64,
           croppedImageMimeType: body.croppedImageMimeType,
-          targetAudience: targetAudience || 'general consumer audience; modern, friendly, concise tone',
         });
         res.status(200).json(out);
       } catch (err) {
