@@ -50,6 +50,7 @@ const { generateAddObject } = require('./src/tools/addObject');
 exports.generateAddObject = generateAddObject;
 
 // Import and export User Operations
-const { getDownloadedImages, getCreatedImages } = require('./src/operations/userOperations');
+const { getDownloadedImages, getCreatedImages, userInfo } = require('./src/operations/userOperations');
 exports.getDownloadedImages = getDownloadedImages;
 exports.getCreatedImages = getCreatedImages;
+exports.userInfo = userInfo;

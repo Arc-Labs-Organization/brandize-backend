@@ -92,7 +92,7 @@ const getDownloadedImages = onRequest(
     if (req.method === 'OPTIONS') {
       res.set('Access-Control-Allow-Origin', '*');
       res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
-      res.set('Access-Control-Allow-Headers', 'Content-Type');
+      res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
       return res.status(204).send('');
     }
 
@@ -166,7 +166,7 @@ const getCreatedImages = onRequest(
     if (req.method === 'OPTIONS') {
       res.set('Access-Control-Allow-Origin', '*');
       res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
-      res.set('Access-Control-Allow-Headers', 'Content-Type');
+      res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
       return res.status(204).send('');
     }
 
@@ -225,3 +225,88 @@ const getCreatedImages = onRequest(
 );
 
 module.exports = { ensureUserExists, decrementUsage, getDownloadedImages, getCreatedImages };
+
+/**
+ * Get user info and remaining usage.
+ * GET /userInfo
+ * Auth: Authorization: Bearer <idToken>
+ * Firestore: users/{uid}
+ * Response:
+ * {
+ *   remainingDownload: number,
+ *   remainingGenerate: number,
+ *   subStatus: 'free' | 'pro'
+ * }
+ */
+const userInfo = onRequest(
+  {
+    region: 'europe-west1',
+    cors: true,
+  },
+  async (req, res) => {
+    // Handle CORS preflight
+    if (req.method === 'OPTIONS') {
+      res.set('Access-Control-Allow-Origin', '*');
+      res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
+      res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+      return res.status(204).send('');
+    }
+
+    return cors(req, res, async () => {
+      if (req.method !== 'GET') {
+        return res.status(405).json({ error: 'Method not allowed. Use GET.' });
+      }
+
+      let uid;
+      try {
+        uid = await verifyAuth(req);
+      } catch (e) {
+        return res.status(401).json({ error: e.message });
+      }
+
+      try {
+        // Ensure user doc exists (server-side authority)
+        await ensureUserExists(uid);
+
+        const userRef = db.collection('users').doc(uid);
+        const snap = await userRef.get();
+        const data = snap.data() || {};
+
+        // Determine subscription status (default to free)
+        const subStatus = data.subStatus === 'pro' ? 'pro' : 'free';
+
+        // Plan limits (env-configurable; safe defaults)
+        const FREE_DOWNLOAD_LIMIT = parseInt(process.env.FREE_DOWNLOAD_LIMIT || '100', 10);
+        const FREE_GENERATE_LIMIT = parseInt(process.env.FREE_GENERATE_LIMIT || '100', 10);
+        const PRO_DOWNLOAD_LIMIT = parseInt(process.env.PRO_DOWNLOAD_LIMIT || '100', 10);
+        const PRO_GENERATE_LIMIT = parseInt(process.env.PRO_GENERATE_LIMIT || '100', 10);
+
+        const planDownloadLimit = subStatus === 'pro' ? PRO_DOWNLOAD_LIMIT : FREE_DOWNLOAD_LIMIT;
+        const planGenerateLimit = subStatus === 'pro' ? PRO_GENERATE_LIMIT : FREE_GENERATE_LIMIT;
+
+        // Prefer server-managed remainingUsage if present; else derive from usage counters
+        const remainingUsage = data.remainingUsage || {};
+        const usageCounters = data.usage || {};
+
+        const remainingDownload = Number.isFinite(remainingUsage.download)
+          ? Math.max(0, remainingUsage.download)
+          : Math.max(0, planDownloadLimit - (Number(usageCounters.download) || 0));
+
+        const remainingGenerate = Number.isFinite(remainingUsage.generate)
+          ? Math.max(0, remainingUsage.generate)
+          : Math.max(0, planGenerateLimit - (Number(usageCounters.generate) || 0));
+
+        return res.status(200).json({
+          remainingDownload,
+          remainingGenerate,
+          subStatus,
+        });
+      } catch (error) {
+        console.error('Error in userInfo:', error);
+        return res.status(500).json({ error: 'Internal Server Error', details: error.message });
+      }
+    });
+  },
+);
+
+module.exports.userInfo = userInfo;
