@@ -4,6 +4,7 @@ const admin = require('firebase-admin');
 const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 const { randomUUID } = require('crypto');
 const { createMultipartParser, buildGeneratedImagePath, verifyAuth } = require('../common/utils');
+const { createAndUploadThumbnail, computeThumbPath } = require('../operations/thumbnailOperations');
 const { ensureUserExists, decrementUsage } = require('../operations/userOperations');
 const { initGenkit, GOOGLE_API_KEY } = require('../common/genkit');
 
@@ -138,6 +139,15 @@ async function getAddObjectFlows() {
 					}
 				}
 
+				// Generate and upload thumbnail via helper for generated image
+				let thumbUrl = null;
+				let thumbPath = computeThumbPath(imagePath);
+				if (file) {
+					const { thumbPath: p, thumbUrl: u } = await createAndUploadThumbnail(bucket, outBuffer, imagePath);
+					thumbPath = p;
+					thumbUrl = u;
+				}
+
 				try {
 					await db.collection('images').doc(id).set({
 						storagePath: imagePath,
@@ -152,12 +162,18 @@ async function getAddObjectFlows() {
 						downloadUrl,
 						modelVersion: null,
 						size: outBuffer.length,
+						thumbUrl: thumbUrl || null,
+						thumbPath,
+						thumbSize: 256,
 					});
 					await db.collection('users').doc(uid).collection('generated').doc(id).set({
 						createdAt: FieldValue.serverTimestamp(),
 						imageId: id,
 						storagePath: imagePath,
 						type: 'generated',
+						thumbUrl: thumbUrl || null,
+						thumbPath,
+						thumbSize: 256,
 					});
 				} catch (_) {}
 
@@ -318,6 +334,15 @@ async function getAddObjectFlows() {
 				}
 			}
 
+			// Thumbnail generation via helper
+			let thumbUrl = null;
+			let thumbPath = computeThumbPath(imagePath);
+			if (file) {
+				const { thumbPath: p, thumbUrl: u } = await createAndUploadThumbnail(bucket, buffer, imagePath);
+				thumbPath = p;
+				thumbUrl = u;
+			}
+
 			try {
 				await db.collection('images').doc(id).set({
 					storagePath: imagePath,
@@ -374,7 +399,6 @@ exports.generateAddObject = onRequest(
 		return cors(req, res, async () => {
 			if (req.method !== 'POST') return res.status(405).json({ error: 'Method Not Allowed' });
 
-			let uid;
 			try {
 				uid = await verifyAuth(req);
 			} catch (e) {

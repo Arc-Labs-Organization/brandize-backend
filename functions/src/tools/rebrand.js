@@ -3,6 +3,7 @@ const cors = require('cors')({ origin: true });
 const admin = require('firebase-admin');
 const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 const { randomUUID } = require('crypto');
+const { createAndUploadThumbnail, computeThumbPath } = require('../operations/thumbnailOperations');
 const { createMultipartParser, buildGeneratedImagePath, verifyAuth } = require('../common/utils');
 const { ensureUserExists, decrementUsage } = require('../operations/userOperations');
 const { initGenkit, GOOGLE_API_KEY } = require('../common/genkit');
@@ -354,6 +355,15 @@ async function getRebrandFlows() {
         downloadUrl = null;
       }
 
+      // Generate and upload thumbnail via helper
+      let thumbUrl = null;
+      let thumbPath = computeThumbPath(imagePath);
+      if (file) {
+        const { thumbPath: p, thumbUrl: u } = await createAndUploadThumbnail(bucket, buffer, imagePath);
+        thumbPath = p;
+        thumbUrl = u;
+      }
+
       // Attempt to write Firestore metadata, but don't fail the entire request if Firestore isn't set up
       const ownerId = uid.trim();
       try {
@@ -373,6 +383,9 @@ async function getRebrandFlows() {
             downloadUrl,
             modelVersion: rawResponse?.modelVersion || null,
             size: buffer.length,
+            thumbUrl: thumbUrl || null,
+            thumbPath,
+            thumbSize: 256,
           });
         if (ownerId) {
           await db.collection('users').doc(ownerId).collection('generated').doc(id).set({
@@ -380,6 +393,9 @@ async function getRebrandFlows() {
             imageId: id,
             storagePath: imagePath,
             type: 'generated',
+            thumbUrl: thumbUrl || null,
+            thumbPath,
+            thumbSize: 256,
           });
         }
       } catch (metaErr) {

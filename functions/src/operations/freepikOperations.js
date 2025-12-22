@@ -338,6 +338,10 @@ exports.freepikDownload = onRequest(
               },
             });
             signedUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(storagePath)}?alt=media&token=${token}`;
+
+            // Generate and upload thumbnail for downloaded image
+            const { createAndUploadThumbnail, computeThumbPath } = require('./thumbnailOperations');
+            const { thumbPath, thumbUrl } = await createAndUploadThumbnail(bucket, imgBuffer, storagePath);
             await imageDocRef.set({
               storagePath,
               type: 'downloaded',
@@ -350,6 +354,9 @@ exports.freepikDownload = onRequest(
               originalDownloadUrl: downloadUrl,
               imageFileName: mainImage.name,
               apiResponse: json,
+              thumbUrl: thumbUrl || null,
+              thumbPath,
+              thumbSize: 256,
             });
           } catch (e) {
             console.error('Caching Freepik resource failed', e);
@@ -367,6 +374,9 @@ exports.freepikDownload = onRequest(
               imageId: resourceId,
               storagePath,
               type: 'downloaded',
+              thumbUrl: (typeof thumbUrl === 'string' ? thumbUrl : null),
+              thumbPath: computeThumbPath(storagePath),
+              thumbSize: 256,
             },
             { merge: true },
           );

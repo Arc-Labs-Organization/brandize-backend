@@ -19,6 +19,8 @@ const db = getFirestore();
 
 let flows = null;
 
+const { createAndUploadThumbnail, computeThumbPath } = require('../operations/thumbnailOperations');
+
 async function getReplaceImageFlows() {
 	if (flows) return flows;
 	const { ai, flow, z, googleAI } = await initGenkit();
@@ -182,6 +184,15 @@ async function getReplaceImageFlows() {
 				}
 			}
 
+			// Generate and upload thumbnail via helper
+			let thumbUrl = null;
+			let thumbPath = computeThumbPath(imagePath);
+			if (file) {
+				const { thumbPath: p, thumbUrl: u } = await createAndUploadThumbnail(bucket, buffer, imagePath);
+				thumbPath = p;
+				thumbUrl = u;
+			}
+
 			try {
 				await db.collection('images').doc(id).set({
 					storagePath: imagePath,
@@ -196,12 +207,18 @@ async function getReplaceImageFlows() {
 					downloadUrl,
 					modelVersion: rawResponse?.modelVersion || null,
 					size: buffer.length,
+					thumbUrl: thumbUrl || null,
+					thumbPath,
+					thumbSize: 256,
 				});
 				await db.collection('users').doc(uid).collection('generated').doc(id).set({
 					createdAt: FieldValue.serverTimestamp(),
 					imageId: id,
 					storagePath: imagePath,
 					type: 'generated',
+					thumbUrl: thumbUrl || null,
+					thumbPath,
+					thumbSize: 256,
 				});
 			} catch (_) {}
 

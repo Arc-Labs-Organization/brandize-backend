@@ -3,6 +3,7 @@ const cors = require('cors')({ origin: true });
 const admin = require('firebase-admin');
 const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 const { randomUUID } = require('crypto');
+const { createAndUploadThumbnail, computeThumbPath } = require('../operations/thumbnailOperations');
 const { createMultipartParser, buildGeneratedImagePath, verifyAuth } = require('../common/utils');
 const { ensureUserExists, decrementUsage } = require('../operations/userOperations');
 const { initGenkit, GOOGLE_API_KEY } = require('../common/genkit');
@@ -229,6 +230,15 @@ async function getChangeTextFlows() {
         }
       }
 
+      // Generate and upload thumbnail via helper
+      let thumbUrl = null;
+      let thumbPath = computeThumbPath(imagePath);
+      if (file) {
+        const { thumbPath: p, thumbUrl: u } = await createAndUploadThumbnail(bucket, buffer, imagePath);
+        thumbPath = p;
+        thumbUrl = u;
+      }
+
       try {
         await db
           .collection('images')
@@ -246,6 +256,9 @@ async function getChangeTextFlows() {
             downloadUrl,
             modelVersion: rawResponse?.modelVersion || null,
             size: buffer.length,
+            thumbUrl: thumbUrl || null,
+            thumbPath,
+            thumbSize: 256,
           });
         await db
           .collection('users')
@@ -257,6 +270,9 @@ async function getChangeTextFlows() {
             imageId: id,
             storagePath: imagePath,
             type: 'generated',
+            thumbUrl: thumbUrl || null,
+            thumbPath,
+            thumbSize: 256,
           });
       } catch (_) {}
 
