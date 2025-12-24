@@ -366,17 +366,21 @@ exports.freepikDownload = onRequest(
           }
         }
 
-        // User link
+        // User link: persist thumbnail fields directly from master image doc (no fallbacks)
         try {
+          const snap = await imageDocRef.get();
+          const meta = snap.exists ? (snap.data() || {}) : {};
+          const linkThumbUrl = typeof meta.thumbUrl === 'string' ? meta.thumbUrl : null;
+          const linkThumbPath = typeof meta.thumbPath === 'string' ? meta.thumbPath : null;
           await db.collection('users').doc(uid).collection('downloads').doc(resourceId).set(
             {
               createdAt: FieldValue.serverTimestamp(),
               imageId: resourceId,
               storagePath,
               type: 'downloaded',
-              thumbUrl: (typeof thumbUrl === 'string' ? thumbUrl : null),
-              thumbPath: computeThumbPath(storagePath),
-              thumbSize: 256,
+              thumbUrl: linkThumbUrl,
+              thumbPath: linkThumbPath,
+              thumbSize: typeof meta.thumbSize === 'number' ? meta.thumbSize : 256,
             },
             { merge: true },
           );

@@ -124,21 +124,24 @@ const getDownloadedImages = onRequest(
           const data = doc.data();
           const imageId = data.imageId;
 
-          // Fetch image details from images collection to get the URL
-          // We do this to ensure we get the latest signed URL or metadata
+          // Fetch image details from images collection to get the latest metadata
           const imageDoc = await db.collection('images').doc(imageId).get();
-          if (imageDoc.exists) {
-            const imageData = imageDoc.data();
-            return {
-              ...data,
-              downloadUrl: imageData.downloadUrl,
-              originalDownloadUrl: imageData.originalDownloadUrl,
-              mimeType: imageData.mimeType,
-              size: imageData.size,
-              imageFileName: imageData.imageFileName,
-            };
-          }
-          return data;
+          const imageData = imageDoc.exists ? imageDoc.data() : {};
+
+          // Build a clean, minimal response object without duplicate thumb fields
+          return {
+            imageId,
+            type: data.type || 'downloaded',
+            storagePath: data.storagePath || imageData.storagePath || null,
+            createdAt: data.createdAt || null,
+            downloadUrl: imageData.downloadUrl || null,
+            originalDownloadUrl: imageData.originalDownloadUrl || null,
+            mimeType: imageData.mimeType,
+            size: imageData.size,
+            imageFileName: imageData.imageFileName,
+            thumbnailUrl: (data.thumbUrl ?? imageData.thumbUrl ?? null),
+            thumbnailPath: (data.thumbPath ?? imageData.thumbPath ?? null),
+          };
         });
 
         const downloads = await Promise.all(downloadPromises);
@@ -198,20 +201,24 @@ const getCreatedImages = onRequest(
           const data = doc.data();
           const imageId = data.imageId;
 
-          // Fetch image details from images collection to get the URL
+          // Fetch image details from images collection to get the latest metadata
           const imageDoc = await db.collection('images').doc(imageId).get();
-          if (imageDoc.exists) {
-            const imageData = imageDoc.data();
-            return {
-              ...data,
-              downloadUrl: imageData.downloadUrl,
-              mimeType: imageData.mimeType,
-              size: imageData.size,
-              prompt: imageData.prompt,
-              aspectRatio: imageData.aspectRatio,
-            };
-          }
-          return data;
+          const imageData = imageDoc.exists ? imageDoc.data() : {};
+
+          // Build a clean, minimal response object without duplicate thumb fields
+          return {
+            imageId,
+            type: data.type || 'generated',
+            storagePath: data.storagePath || imageData.storagePath || null,
+            createdAt: data.createdAt || null,
+            downloadUrl: imageData.downloadUrl || null,
+            mimeType: imageData.mimeType,
+            size: imageData.size,
+            prompt: imageData.prompt,
+            aspectRatio: imageData.aspectRatio,
+            thumbnailUrl: (data.thumbUrl ?? imageData.thumbUrl ?? null),
+            thumbnailPath: (data.thumbPath ?? imageData.thumbPath ?? null),
+          };
         });
 
         const created = await Promise.all(createdPromises);
