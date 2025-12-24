@@ -5,8 +5,10 @@ const admin = require('firebase-admin');
 const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 const { randomUUID } = require('crypto');
 const JSZip = require('jszip');
+const sharp = require('sharp');
 const { buildCommonImagePath, verifyAuth } = require('../common/utils');
 const { ensureUserExists, decrementUsage } = require('./userOperations');
+const { initGenkit, GOOGLE_API_KEY } = require('../common/genkit');
 
 try {
   if (!admin.apps.length) {
@@ -399,4 +401,293 @@ exports.freepikDownload = onRequest(
       }
     });
   },
+);
+
+/**
+ * Download a Freepik template, analyze layouts with Gemini, crop them, and save.
+ * GET /api/freepik/downloadTemplate?resourceId=<id>
+ */
+exports.freepikDownloadTemplate = onRequest(
+  {
+    region: 'europe-west1',
+    timeoutSeconds: 300,
+    memory: '1GiB',
+    cors: true,
+    secrets: [FREEPIK_API_KEY, GOOGLE_API_KEY],
+  },
+  async (req, res) => {
+    if (req.method === 'OPTIONS') {
+      res.set('Access-Control-Allow-Origin', '*');
+      res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
+      res.set('Access-Control-Allow-Headers', 'Content-Type');
+      return res.status(204).send('');
+    }
+
+    return cors(req, res, async () => {
+      if (req.method !== 'GET') {
+        return res.status(405).json({ error: 'Method not allowed. Use GET.' });
+      }
+
+      let uid;
+      try {
+        uid = await verifyAuth(req);
+      } catch (e) {
+        return res.status(401).json({ error: e.message });
+      }
+
+      const resourceId = (req.query.resourceId || '').toString().trim();
+      if (!resourceId)
+        return res.status(400).json({ error: 'Missing required query parameter: resourceId' });
+
+      if (!process.env.FREEPIK_API_KEY) {
+        return res.status(500).json({ error: 'FREEPIK_API_KEY not configured on server' });
+      }
+
+      try {
+        const startTime = Date.now();
+        let lastTime = startTime;
+        const logTime = (step) => {
+            const now = Date.now();
+            console.log(`[Timer] ${step}: ${now - lastTime}ms (Total: ${now - startTime}ms)`);
+            lastTime = now;
+        };
+
+        // Ensure user exists and decrement download usage
+        await ensureUserExists(uid);
+        await decrementUsage(uid, 'download');
+
+        // 1. Get Download URL from Freepik
+        // Use the format-specific endpoint: /v1/resources/{id}/download/jpg
+        const apiUrl = new URL(
+          `https://api.freepik.com/v1/resources/${encodeURIComponent(resourceId)}/download/jpg`,
+        );
+
+        const apiKey = (process.env.FREEPIK_API_KEY || '').trim();
+        
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 30000); // 30s timeout
+
+        let fpResp;
+        try {
+            fpResp = await fetch(apiUrl.toString(), {
+              method: 'GET',
+              headers: {
+                'x-freepik-api-key': apiKey,
+                Authorization: `Bearer ${apiKey}`,
+                Accept: 'application/json',
+              },
+              signal: controller.signal,
+            });
+        } catch (e) {
+             if (e.name === 'AbortError') {
+                 return res.status(504).json({ error: 'Freepik API timeout' });
+             }
+             throw e;
+        } finally {
+            clearTimeout(timeout);
+        }
+
+        if (!fpResp.ok) {
+          const text = await fpResp.text();
+          return res.status(fpResp.status).json({ error: 'Freepik API error', details: text });
+        }
+
+        const json = await fpResp.json();
+        let downloadUrl = null;
+        if (json.data && Array.isArray(json.data) && json.data.length > 0) {
+             downloadUrl = json.data[0].url;
+        } else {
+             // Fallback for other response shapes
+             downloadUrl = (json && (json.url || json.location)) || null;
+        }
+        
+        if (!downloadUrl)
+          return res.status(502).json({ error: 'Missing download URL from Freepik response' });
+        
+        logTime('Get Download URL');
+
+        // 2. Download the asset (zip or image)
+        const dlController = new AbortController();
+        const dlTimeout = setTimeout(() => dlController.abort(), 60000); // 60s timeout for download
+
+        let assetResp;
+        try {
+            assetResp = await fetch(downloadUrl, { signal: dlController.signal });
+        } catch (e) {
+             if (e.name === 'AbortError') {
+                 return res.status(504).json({ error: 'Asset download timeout' });
+             }
+             throw e;
+        } finally {
+            clearTimeout(dlTimeout);
+        }
+
+        if (!assetResp.ok)
+          return res.status(assetResp.status).json({ error: 'Failed to fetch Freepik asset' });
+        
+        const assetBuffer = Buffer.from(await assetResp.arrayBuffer());
+        logTime('Download Asset');
+        let imgBuffer = null;
+        let mimeType = 'image/jpeg';
+
+        // Check if zip
+        try {
+            const zip = await JSZip.loadAsync(assetBuffer);
+            console.log('freepikDownloadTemplate: Downloaded file is a ZIP archive.');
+            // Find the first jpg/jpeg
+            const imageFiles = Object.values(zip.files).filter(
+              (f) => !f.dir && /\.(jpg|jpeg)$/i.test(f.name)
+            );
+            if (imageFiles.length > 0) {
+                imgBuffer = await imageFiles[0].async('nodebuffer');
+                if (imageFiles[0].name.toLowerCase().endsWith('.jpg') || imageFiles[0].name.toLowerCase().endsWith('.jpeg')) {
+                    mimeType = 'image/jpeg';
+                }
+            } else {
+                 // Fallback to other images if no jpg
+                 const anyImage = Object.values(zip.files).filter(
+                    (f) => !f.dir && /\.(png|webp)$/i.test(f.name)
+                 );
+                 if (anyImage.length > 0) {
+                     imgBuffer = await anyImage[0].async('nodebuffer');
+                     if (anyImage[0].name.toLowerCase().endsWith('.png')) mimeType = 'image/png';
+                     else if (anyImage[0].name.toLowerCase().endsWith('.webp')) mimeType = 'image/webp';
+                 }
+            }
+        } catch (e) {
+            console.log('freepikDownloadTemplate: Downloaded file is likely an image (not a ZIP).');
+            // Not a zip, maybe it's the image directly
+            imgBuffer = assetBuffer;
+            const contentType = assetResp.headers.get('content-type');
+            if (contentType) mimeType = contentType;
+        }
+
+        if (!imgBuffer) {
+            return res.status(422).json({ error: 'No valid image found in download' });
+        }
+        logTime('Process Zip/Image');
+
+        // 3. Send to Gemini
+        const { ai, googleAI } = await initGenkit();
+        const promptText = `can you identify how many social layouts in this images and tell me the normalized coordinates? Give me the normalized coordinates (0...1), so I can calculate to the image size on my end. Response only with json in this format:
+{
+"layouts": [
+{
+"top_left": { "x": 0.134, "y": 0.128 },
+"bottom_right": { "x": 0.359, "y": 0.528 }
+},
+...
+]
+}`;
+
+        const generateResp = await ai.generate({
+            model: googleAI.model('gemini-3-flash-preview'),
+            prompt: [
+                { media: { url: `data:${mimeType};base64,${imgBuffer.toString('base64')}`, contentType: mimeType } },
+                { text: promptText }
+            ],
+            config: {
+                temperature: 0.4,
+            },
+            output: { format: 'json' }
+        });
+
+        const responseText = generateResp.text;
+        console.log('freepikDownloadTemplate: Gemini response:', responseText);
+        const jsonStr = responseText.replace(/```json\n?|\n?```/g, '').trim();
+        let layoutData;
+        try {
+            layoutData = JSON.parse(jsonStr);
+        } catch (e) {
+            console.error('Failed to parse Gemini response:', responseText);
+            return res.status(500).json({ error: 'Invalid response from AI model', details: responseText });
+        }
+
+        if (!layoutData || !Array.isArray(layoutData.layouts)) {
+             return res.status(500).json({ error: 'Invalid layout data format from AI', details: layoutData });
+        }
+        logTime('Gemini Analysis');
+
+        // 4. Crop images
+        const metadata = await sharp(imgBuffer).metadata();
+        const width = metadata.width;
+        const height = metadata.height;
+
+        const crops = [];
+        // Add original image to list
+        crops.push({ name: 'original.jpg', buffer: imgBuffer });
+
+        for (let i = 0; i < layoutData.layouts.length; i++) {
+            const layout = layoutData.layouts[i];
+            
+            // Get normalized coordinates (0-1)
+            const x1_norm = layout.top_left?.x || 0;
+            const y1_norm = layout.top_left?.y || 0;
+            const x2_norm = layout.bottom_right?.x || 0;
+            const y2_norm = layout.bottom_right?.y || 0;
+
+            // Convert to pixels
+            let x1 = Math.floor(x1_norm * width);
+            let y1 = Math.floor(y1_norm * height);
+            let x2 = Math.floor(x2_norm * width);
+            let y2 = Math.floor(y2_norm * height);
+
+            // Validate coordinates (clamp)
+            x1 = Math.max(0, x1);
+            y1 = Math.max(0, y1);
+            x2 = Math.min(width, x2);
+            y2 = Math.min(height, y2);
+
+            const cropW = x2 - x1;
+            const cropH = y2 - y1;
+
+            if (cropW > 0 && cropH > 0) {
+                try {
+                    const cropBuffer = await sharp(imgBuffer)
+                        .extract({ left: x1, top: y1, width: cropW, height: cropH })
+                        .toFormat('jpeg')
+                        .toBuffer();
+                    crops.push({ name: `cropped_${i + 1}.jpg`, buffer: cropBuffer });
+                } catch (e) {
+                    console.error(`Failed to crop layout ${i}:`, e);
+                }
+            } else {
+                console.warn(`Skipping invalid crop ${i}: [${x1}, ${y1}, ${x2}, ${y2}]`);
+            }
+        }
+        logTime('Cropping Images');
+
+        // 5. Save to Firebase Storage
+        const bucket = admin.storage().bucket();
+        const uploadPromises = crops.map(async (crop) => {
+            const storagePath = `images/common/${resourceId}/${crop.name}`;
+            const file = bucket.file(storagePath);
+            const token = randomUUID();
+            await file.save(crop.buffer, {
+                resumable: false,
+                contentType: 'image/jpeg',
+                metadata: {
+                    cacheControl: 'public, max-age=31536000',
+                    metadata: { firebaseStorageDownloadTokens: token },
+                },
+            });
+            const signedUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(storagePath)}?alt=media&token=${token}`;
+            return { name: crop.name, path: storagePath, url: signedUrl };
+        });
+
+        const uploadedFiles = await Promise.all(uploadPromises);
+        logTime('Storage Upload');
+
+        return res.status(200).json({
+            resourceId,
+            files: uploadedFiles,
+            layouts: layoutData.layouts
+        });
+
+      } catch (err) {
+        console.error('freepikDownloadTemplate error:', err);
+        return res.status(500).json({ error: 'Internal Server Error', details: err.message });
+      }
+    });
+  }
 );
