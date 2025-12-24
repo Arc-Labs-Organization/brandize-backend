@@ -455,6 +455,7 @@ exports.freepikDownloadTemplate = onRequest(
         // Ensure user exists and decrement download usage
         await ensureUserExists(uid);
         await decrementUsage(uid, 'download');
+        logTime('User Accounting (Firestore)');
 
         // 1. Get Download URL from Freepik
         // Use the format-specific endpoint: /v1/resources/{id}/download/jpg
@@ -567,6 +568,32 @@ exports.freepikDownloadTemplate = onRequest(
         }
         logTime('Process Zip/Image');
 
+        // 2.5. Start Upload of Original Image (Parallel)
+        const originalPath = `images/common/${resourceId}/original.jpg`;
+        const originalToken = randomUUID();
+        const originalUploadPromise = bucket.file(originalPath).save(imgBuffer, {
+            resumable: false,
+            contentType: mimeType,
+            metadata: {
+                cacheControl: 'public, max-age=31536000',
+                metadata: { firebaseStorageDownloadTokens: originalToken },
+            },
+        }).then(() => ({
+            name: 'original.jpg',
+            path: originalPath,
+            url: `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(originalPath)}?alt=media&token=${originalToken}`
+        }));
+
+        // 2.6. Resize for Gemini
+        // Force JPEG for Gemini to keep payload small, regardless of original format
+        const geminiBuffer = await sharp(imgBuffer)
+            .resize({ width: 1024, height: 1024, fit: 'inside' })
+            .jpeg({ quality: 80 })
+            .toBuffer();
+        
+        logTime('Resize for Gemini');
+        console.log(`Gemini Payload Size: ${(geminiBuffer.length / 1024).toFixed(2)} KB`);
+
         // 3. Send to Gemini
         const { ai, googleAI } = await initGenkit();
         const promptText = `can you identify how many social layouts in this images and tell me the normalized coordinates? Give me the normalized coordinates (0...1), so I can calculate to the image size on my end. Response only with json in this format:
@@ -580,10 +607,11 @@ exports.freepikDownloadTemplate = onRequest(
 ]
 }`;
 
+        // Use image/jpeg content type since we forced conversion
         const generateResp = await ai.generate({
             model: googleAI.model('gemini-3-flash-preview'),
             prompt: [
-                { media: { url: `data:${mimeType};base64,${imgBuffer.toString('base64')}`, contentType: mimeType } },
+                { media: { url: `data:image/jpeg;base64,${geminiBuffer.toString('base64')}`, contentType: 'image/jpeg' } },
                 { text: promptText }
             ],
             config: {
@@ -614,8 +642,7 @@ exports.freepikDownloadTemplate = onRequest(
         const height = metadata.height;
 
         const crops = [];
-        // Add original image to list
-        crops.push({ name: 'original.jpg', buffer: imgBuffer });
+        // Original image is already being uploaded
 
         for (let i = 0; i < layoutData.layouts.length; i++) {
             const layout = layoutData.layouts[i];
@@ -658,8 +685,7 @@ exports.freepikDownloadTemplate = onRequest(
         logTime('Cropping Images');
 
         // 5. Save to Firebase Storage
-        const bucket = admin.storage().bucket();
-        const uploadPromises = crops.map(async (crop) => {
+        const cropUploadPromises = crops.map(async (crop) => {
             const storagePath = `images/common/${resourceId}/${crop.name}`;
             const file = bucket.file(storagePath);
             const token = randomUUID();
@@ -675,7 +701,7 @@ exports.freepikDownloadTemplate = onRequest(
             return { name: crop.name, path: storagePath, url: signedUrl };
         });
 
-        const uploadedFiles = await Promise.all(uploadPromises);
+        const uploadedFiles = await Promise.all([originalUploadPromise, ...cropUploadPromises]);
         logTime('Storage Upload');
 
         return res.status(200).json({
