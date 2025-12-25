@@ -713,6 +713,42 @@ exports.freepikDownloadTemplate = onRequest(
         const uploadedFiles = await Promise.all([originalUploadPromise, thumbnailPromise, ...cropUploadPromises]);
         logTime('Storage Upload');
 
+        // Extract results
+        const originalResult = uploadedFiles[0];
+        const thumbResult = uploadedFiles[1];
+
+        // Save to Firestore (Master Image Doc)
+        const imageDocRef = db.collection('images').doc(resourceId);
+        await imageDocRef.set({
+            storagePath: originalResult.path,
+            type: 'template_download',
+            ownerId: null,
+            createdAt: FieldValue.serverTimestamp(),
+            resourceId,
+            mimeType: mimeType,
+            size: imgBuffer.length,
+            downloadUrl: originalResult.url,
+            originalDownloadUrl: downloadUrl,
+            thumbUrl: thumbResult.url,
+            thumbPath: thumbResult.path,
+            thumbSize: 256,
+            layouts: layoutData.layouts,
+            apiResponse: json
+        });
+
+        // Save to Firestore (User Download Doc)
+        await db.collection('users').doc(uid).collection('downloads').doc(resourceId).set({
+            createdAt: FieldValue.serverTimestamp(),
+            imageId: resourceId,
+            storagePath: originalResult.path,
+            type: 'template_download',
+            thumbUrl: thumbResult.url,
+            thumbPath: thumbResult.path,
+            thumbSize: 256,
+        }, { merge: true });
+        
+        logTime('Firestore Write');
+
         return res.status(200).json({
             resourceId,
             files: uploadedFiles,
@@ -721,6 +757,204 @@ exports.freepikDownloadTemplate = onRequest(
 
       } catch (err) {
         console.error('freepikDownloadTemplate error:', err);
+        return res.status(500).json({ error: 'Internal Server Error', details: err.message });
+      }
+    });
+  }
+);
+
+/**
+ * Get all downloaded thumbnails for the authenticated user.
+ * GET /api/freepik/downloadedThumbnails
+ * Returns: { thumbnails: Array<{ imageId, thumbnailUrl, type, createdAt }> }
+ */
+exports.getDownloadedThumbnails = onRequest(
+  {
+    region: 'europe-west1',
+    cors: true,
+  },
+  async (req, res) => {
+    if (req.method === 'OPTIONS') {
+      res.set('Access-Control-Allow-Origin', '*');
+      res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
+      res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+      return res.status(204).send('');
+    }
+
+    return cors(req, res, async () => {
+      if (req.method !== 'GET') {
+        return res.status(405).json({ error: 'Method not allowed. Use GET.' });
+      }
+
+      let uid;
+      try {
+        uid = await verifyAuth(req);
+      } catch (e) {
+        return res.status(401).json({ error: e.message });
+      }
+
+      try {
+        const snapshot = await db
+          .collection('users')
+          .doc(uid)
+          .collection('downloads')
+          .orderBy('createdAt', 'desc')
+          .get();
+
+        const thumbnails = snapshot.docs.map(doc => {
+          const data = doc.data();
+          return {
+            imageId: data.imageId || doc.id,
+            thumbnailUrl: data.thumbUrl || null,
+            type: data.type || 'downloaded',
+            createdAt: data.createdAt || null,
+          };
+        });
+
+        return res.status(200).json({ thumbnails });
+      } catch (err) {
+        console.error('getDownloadedThumbnails error:', err);
+        return res.status(500).json({ error: 'Internal Server Error', details: err.message });
+      }
+    });
+  }
+);
+
+/**
+ * Get all assets (original + crops) for a specific downloaded resource.
+ * GET /api/freepik/downloadedAssets?resourceId=<id>
+ */
+exports.getDownloadedAssets = onRequest(
+  {
+    region: 'europe-west1',
+    cors: true,
+  },
+  async (req, res) => {
+    if (req.method === 'OPTIONS') {
+      res.set('Access-Control-Allow-Origin', '*');
+      res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
+      res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+      return res.status(204).send('');
+    }
+
+    return cors(req, res, async () => {
+      if (req.method !== 'GET') {
+        return res.status(405).json({ error: 'Method not allowed. Use GET.' });
+      }
+
+      let uid;
+      try {
+        uid = await verifyAuth(req);
+      } catch (e) {
+        return res.status(401).json({ error: e.message });
+      }
+
+      const resourceId = (req.query.resourceId || '').toString().trim();
+      if (!resourceId) {
+        return res.status(400).json({ error: 'Missing required query parameter: resourceId' });
+      }
+
+      try {
+        // 1. Verify user has access to this download
+        const userDownloadDoc = await db
+          .collection('users')
+          .doc(uid)
+          .collection('downloads')
+          .doc(resourceId)
+          .get();
+
+        if (!userDownloadDoc.exists) {
+          return res.status(404).json({ error: 'Download not found for this user' });
+        }
+
+        const userDownloadData = userDownloadDoc.data();
+        const type = userDownloadData.type || 'downloaded';
+
+        // 2. Fetch assets based on type
+        let assets = [];
+
+        if (type === 'template_download') {
+          // List files from storage: images/common/{resourceId}/
+          const prefix = `images/common/${resourceId}/`;
+          const [files] = await bucket.getFiles({ prefix });
+
+          // Fetch metadata for each file to construct public URLs
+          const assetPromises = files.map(async (file) => {
+            // Skip if it's a directory placeholder (if any)
+            if (file.name.endsWith('/')) return null;
+
+            try {
+              const [metadata] = await file.getMetadata();
+              const token = metadata.metadata?.firebaseStorageDownloadTokens;
+              
+              let url = null;
+              if (token) {
+                url = `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(file.name)}?alt=media&token=${token}`;
+              } else {
+                // Fallback: generate signed URL if no token (though we usually set tokens)
+                const [signedUrl] = await file.getSignedUrl({
+                  action: 'read',
+                  expires: Date.now() + 1000 * 60 * 60, // 1 hour
+                });
+                url = signedUrl;
+              }
+
+              return {
+                name: file.name.split('/').pop(), // filename only
+                path: file.name,
+                url: url,
+                contentType: metadata.contentType,
+                size: metadata.size,
+              };
+            } catch (e) {
+              console.warn(`Failed to get metadata for ${file.name}`, e);
+              return null;
+            }
+          });
+
+          const results = await Promise.all(assetPromises);
+          assets = results.filter(r => r !== null);
+
+          // Sort assets: original first, then crops
+          assets.sort((a, b) => {
+            if (a.name.startsWith('original')) return -1;
+            if (b.name.startsWith('original')) return 1;
+            return a.name.localeCompare(b.name);
+          });
+
+        } else {
+          // Standard download - fetch from master image doc
+          const imageDoc = await db.collection('images').doc(resourceId).get();
+          if (imageDoc.exists) {
+            const imgData = imageDoc.data();
+            assets.push({
+              name: imgData.imageFileName || 'image.jpg',
+              path: imgData.storagePath,
+              url: imgData.downloadUrl,
+              contentType: imgData.mimeType,
+              size: imgData.size,
+            });
+            // Include thumbnail if available
+            if (imgData.thumbUrl) {
+               assets.push({
+                   name: 'thumbnail.jpg',
+                   path: imgData.thumbPath,
+                   url: imgData.thumbUrl,
+                   contentType: 'image/jpeg',
+                   size: 0 // unknown
+               });
+            }
+          }
+        }
+
+        return res.status(200).json({
+          resourceId,
+          type,
+          assets
+        });
+
+      } catch (err) {
+        console.error('getDownloadedAssets error:', err);
         return res.status(500).json({ error: 'Internal Server Error', details: err.message });
       }
     });

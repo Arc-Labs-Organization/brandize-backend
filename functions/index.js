@@ -27,10 +27,12 @@ exports.deleteBrand = deleteBrand;
 exports.getBrands = getBrands;
 
 // Import and export Freepik Operations
-const { freepikSearch, freepikDownload, freepikDownloadTemplate } = require('./src/operations/freepikOperations');
+const { freepikSearch, freepikDownload, freepikDownloadTemplate, getDownloadedThumbnails, getDownloadedAssets } = require('./src/operations/freepikOperations');
 exports.freepikSearch = freepikSearch;
 exports.freepikDownload = freepikDownload;
 exports.freepikDownloadTemplate = freepikDownloadTemplate;
+exports.getDownloadedThumbnails = getDownloadedThumbnails;
+exports.getDownloadedAssets = getDownloadedAssets;
 
 // Import and export Rebrand Tool Operations (Image Generation & Blueprinting)
 const { generateRebrand, generateSmartBlueprint } = require('./src/tools/rebrand');
