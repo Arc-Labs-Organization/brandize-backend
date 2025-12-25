@@ -584,6 +584,15 @@ exports.freepikDownloadTemplate = onRequest(
             url: `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(originalPath)}?alt=media&token=${originalToken}`
         }));
 
+        // Generate thumbnail for original image
+        const { createAndUploadThumbnail } = require('./thumbnailOperations');
+        const thumbnailPromise = createAndUploadThumbnail(bucket, imgBuffer, originalPath)
+            .then(({ thumbPath, thumbUrl }) => ({
+                name: 'original_thumb_256.jpg',
+                path: thumbPath,
+                url: thumbUrl
+            }));
+
         // 2.6. Resize for Gemini
         // Force JPEG for Gemini to keep payload small, regardless of original format
         const geminiBuffer = await sharp(imgBuffer)
@@ -701,7 +710,7 @@ exports.freepikDownloadTemplate = onRequest(
             return { name: crop.name, path: storagePath, url: signedUrl };
         });
 
-        const uploadedFiles = await Promise.all([originalUploadPromise, ...cropUploadPromises]);
+        const uploadedFiles = await Promise.all([originalUploadPromise, thumbnailPromise, ...cropUploadPromises]);
         logTime('Storage Upload');
 
         return res.status(200).json({
