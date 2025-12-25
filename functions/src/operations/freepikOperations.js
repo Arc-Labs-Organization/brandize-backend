@@ -457,6 +457,78 @@ exports.freepikDownloadTemplate = onRequest(
         await decrementUsage(uid, 'download');
         logTime('User Accounting (Firestore)');
 
+        // Check if template is already processed
+        const existingDocRef = db.collection('images').doc(resourceId);
+        const existingDoc = await existingDocRef.get();
+
+        if (existingDoc.exists && existingDoc.data().type === 'template_download') {
+          console.log(`[freepikDownloadTemplate] Cache hit for ${resourceId}`);
+          const imgData = existingDoc.data();
+
+          let uploadedFiles = [];
+          if (imgData.files && Array.isArray(imgData.files)) {
+            uploadedFiles = imgData.files;
+          } else {
+            // Fallback: List files from storage if 'files' array is missing in Firestore
+            const prefix = `images/common/${resourceId}/`;
+            const [files] = await bucket.getFiles({ prefix });
+
+            const filePromises = files.map(async (file) => {
+              if (file.name.endsWith('/')) return null;
+
+              // Get metadata for token
+              const [metadata] = await file.getMetadata().catch(() => [{}]);
+              let token = metadata.metadata?.firebaseStorageDownloadTokens;
+              let url;
+
+              if (token) {
+                url = `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(file.name)}?alt=media&token=${token}`;
+              } else {
+                // Fallback if no token
+                const [signedUrl] = await file.getSignedUrl({
+                  action: 'read',
+                  expires: Date.now() + 1000 * 60 * 60, // 1 hour
+                });
+                url = signedUrl;
+              }
+
+              return {
+                name: file.name.split('/').pop(),
+                path: file.name,
+                url: url,
+              };
+            });
+
+            uploadedFiles = (await Promise.all(filePromises)).filter((f) => f !== null);
+            
+            // Optional: Backfill the files array to Firestore for next time
+            try {
+                await existingDocRef.update({ files: uploadedFiles });
+            } catch (e) {
+                console.warn('Failed to backfill files array', e);
+            }
+          }
+
+          // Ensure user link exists
+          await db.collection('users').doc(uid).collection('downloads').doc(resourceId).set(
+            {
+              createdAt: FieldValue.serverTimestamp(),
+              imageId: resourceId,
+              storagePath: imgData.storagePath,
+              type: 'template_download',
+              thumbUrl: imgData.thumbUrl,
+              thumbPath: imgData.thumbPath,
+              thumbSize: 256,
+            },
+            { merge: true },
+          );
+
+          return res.status(200).json({
+            resourceId,
+            files: uploadedFiles,
+          });
+        }
+
         // 1. Get Download URL from Freepik
         // Use the format-specific endpoint: /v1/resources/{id}/download/jpg
         const apiUrl = new URL(
@@ -733,7 +805,8 @@ exports.freepikDownloadTemplate = onRequest(
             thumbPath: thumbResult.path,
             thumbSize: 256,
             layouts: layoutData.layouts,
-            apiResponse: json
+            apiResponse: json,
+            files: uploadedFiles
         });
 
         // Save to Firestore (User Download Doc)
@@ -752,7 +825,6 @@ exports.freepikDownloadTemplate = onRequest(
         return res.status(200).json({
             resourceId,
             files: uploadedFiles,
-            layouts: layoutData.layouts
         });
 
       } catch (err) {
