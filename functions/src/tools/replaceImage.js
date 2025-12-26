@@ -303,8 +303,39 @@ exports.generateReplaceImage = onRequest(
 
 					const description = String(fields.replacable_img_description || fields.description || '').trim();
 					const aspectRatio = String(fields.aspectRatio || '').trim() || undefined;
-					if (!croppedBuffer || !newBuffer || !description) {
-						return res.status(400).json({ error: 'Missing required fields: cropped_img, new_img, replacable_img_description' });
+
+					if (!newBuffer || !description) {
+						return res.status(400).json({ error: 'Missing required fields: new_img, replacable_img_description' });
+					}
+
+					if (!croppedBuffer) {
+						const storagePath = fields.storagePath;
+						if (storagePath) {
+							try {
+								const appOptions = admin.app().options || {};
+								const configuredBucket = appOptions.storageBucket;
+								const projId = process.env.GCLOUD_PROJECT || process.env.GCP_PROJECT;
+								const bucketName = configuredBucket || (projId ? `${projId}.appspot.com` : undefined);
+								const bucket = bucketName ? admin.storage().bucket(bucketName) : admin.storage().bucket();
+
+								const file = bucket.file(storagePath);
+								const [exists] = await file.exists();
+								if (!exists) {
+									return res.status(404).json({ error: 'Image not found at storagePath' });
+								}
+
+								const [metadata] = await file.getMetadata();
+								croppedMime = metadata.contentType || 'image/png';
+
+								const [downloadedBuffer] = await file.download();
+								croppedBuffer = downloadedBuffer;
+							} catch (e) {
+								console.error('Error downloading from storage:', e);
+								return res.status(500).json({ error: 'Failed to download image from storage' });
+							}
+						} else {
+							return res.status(400).json({ error: 'Missing required fields: cropped_img or storagePath' });
+						}
 					}
 
 					const out = await generateReplaceImage({
