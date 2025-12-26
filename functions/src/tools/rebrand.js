@@ -767,14 +767,35 @@ exports.generateSmartBlueprint = onRequest(
           }
         });
 
-        const { brand_id, updateFields } = fields;
+        const { brand_id, updateFields, storagePath } = fields;
 
         if (!brand_id || !updateFields) {
           return res.status(400).json({ error: 'Missing required fields: brand_id, updateFields' });
         }
 
         if (!imageBuffer) {
-          return res.status(400).json({ error: 'Missing required file: croppedImage' });
+          if (storagePath) {
+            try {
+              const appOptions = admin.app().options || {};
+              const configuredBucket = appOptions.storageBucket;
+              const projId = process.env.GCLOUD_PROJECT || process.env.GCP_PROJECT;
+              const bucketName = configuredBucket || (projId ? `${projId}.appspot.com` : undefined);
+              const bucket = bucketName ? admin.storage().bucket(bucketName) : admin.storage().bucket();
+
+              const file = bucket.file(storagePath);
+              const [exists] = await file.exists();
+              if (!exists) {
+                return res.status(404).json({ error: 'Image not found at storagePath' });
+              }
+              const [downloadedBuffer] = await file.download();
+              imageBuffer = downloadedBuffer;
+            } catch (e) {
+              console.error('Error downloading from storage:', e);
+              return res.status(500).json({ error: 'Failed to download image from storage' });
+            }
+          } else {
+            return res.status(400).json({ error: 'Missing required file: croppedImage or field: storagePath' });
+          }
         }
 
         // Fetch brand from Firestore
