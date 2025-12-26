@@ -52,6 +52,10 @@ exports.generateReplaceImage = generateReplaceImage;
 const { generateAddObject } = require('./src/tools/addObject');
 exports.generateAddObject = generateAddObject;
 
+// Import and export Virtual Model Tool
+const { generateVirtualModel } = require('./src/tools/virtualModel');
+exports.generateVirtualModel = generateVirtualModel;
+
 // Import and export User Operations
 const { getDownloadedImages, getCreatedImages, userInfo } = require('./src/operations/userOperations');
 exports.getDownloadedImages = getDownloadedImages;
