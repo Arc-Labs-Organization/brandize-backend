@@ -346,7 +346,33 @@ exports.extractTexts = onRequest(
           });
 
           if (!imageBuffer) {
-              return res.status(400).json({ error: 'Missing required fields: croppedImage' });
+            const storagePath = fields.storagePath;
+            if (storagePath) {
+              try {
+                const appOptions = admin.app().options || {};
+                const configuredBucket = appOptions.storageBucket;
+                const projId = process.env.GCLOUD_PROJECT || process.env.GCP_PROJECT;
+                const bucketName = configuredBucket || (projId ? `${projId}.appspot.com` : undefined);
+                const bucket = bucketName ? admin.storage().bucket(bucketName) : admin.storage().bucket();
+
+                const file = bucket.file(storagePath);
+                const [exists] = await file.exists();
+                if (!exists) {
+                  return res.status(404).json({ error: 'Image not found at storagePath' });
+                }
+
+                const [metadata] = await file.getMetadata();
+                imageMimeType = metadata.contentType || 'image/png';
+
+                const [downloadedBuffer] = await file.download();
+                imageBuffer = downloadedBuffer;
+              } catch (e) {
+                console.error('Error downloading from storage:', e);
+                return res.status(500).json({ error: 'Failed to download image from storage' });
+              }
+            } else {
+              return res.status(400).json({ error: 'Missing required fields: croppedImage or storagePath' });
+            }
           }
 
           // Perform user accounting here (not as input to the flow)
@@ -447,8 +473,39 @@ exports.generateChangeText = onRequest(
 
           // const uid = String(fields.uid || '').trim(); // Removed
           const bpText = fields.blueprint || fields.blueprintText;
-          if (!bpText || !imageBuffer) {
-            return res.status(400).json({ error: 'Missing required fields: blueprint, croppedImage' });
+
+          if (!bpText) {
+            return res.status(400).json({ error: 'Missing required fields: blueprint' });
+          }
+
+          if (!imageBuffer) {
+            const storagePath = fields.storagePath;
+            if (storagePath) {
+              try {
+                const appOptions = admin.app().options || {};
+                const configuredBucket = appOptions.storageBucket;
+                const projId = process.env.GCLOUD_PROJECT || process.env.GCP_PROJECT;
+                const bucketName = configuredBucket || (projId ? `${projId}.appspot.com` : undefined);
+                const bucket = bucketName ? admin.storage().bucket(bucketName) : admin.storage().bucket();
+
+                const file = bucket.file(storagePath);
+                const [exists] = await file.exists();
+                if (!exists) {
+                  return res.status(404).json({ error: 'Image not found at storagePath' });
+                }
+
+                const [metadata] = await file.getMetadata();
+                imageMimeType = metadata.contentType || 'image/png';
+
+                const [downloadedBuffer] = await file.download();
+                imageBuffer = downloadedBuffer;
+              } catch (e) {
+                console.error('Error downloading from storage:', e);
+                return res.status(500).json({ error: 'Failed to download image from storage' });
+              }
+            } else {
+              return res.status(400).json({ error: 'Missing required fields: croppedImage or storagePath' });
+            }
           }
           let blueprint;
           try {
