@@ -268,7 +268,6 @@ async function getVirtualModelFlows() {
 				mimeType,
 				id,
 				storagePath: imagePath,
-				downloadUrl,
 				generated_img_url: downloadUrl,
 				thumbUrl,
 				thumbPath,
@@ -335,7 +334,7 @@ exports.generateVirtualModel = onRequest(
 							file.on('data', (d) => chunks.push(d));
 							file.on('end', () => {
 								const buf = Buffer.concat(chunks);
-								if (fieldname === 'model_img' || fieldname === 'modelImage') {
+								if (fieldname === 'model_img' || fieldname === 'modelImage' || fieldname === 'cropped_img' || fieldname === 'croppedImage') {
 									modelBuffer = buf;
 									modelMime = mimeType;
 								} else if (fieldname === 'product_img' || fieldname === 'productImage') {
@@ -361,38 +360,40 @@ exports.generateVirtualModel = onRequest(
 						return res.status(400).json({ error: 'Missing or invalid field: mode (must be hold|wear)' });
 					}
 
-					// If modelBuffer missing, load from URL only (no storagePath support)
+					// If modelBuffer missing, load from storagePath (required alternative to file)
 					if (!modelBuffer) {
-						const downloadUrl = fields.modelDownloadUrl || fields.downloadUrl;
-						if (downloadUrl) {
+						const storagePath = fields.modelStoragePath || fields.storagePath;
+						if (storagePath) {
 							try {
-								const { buffer, mimeType } = await fetchImageBufferFromUrl(downloadUrl);
-								modelBuffer = buffer;
-								modelMime = mimeType;
+								const appOptions = admin.app().options || {};
+								const configuredBucket = appOptions.storageBucket;
+								const projId = process.env.GCLOUD_PROJECT || process.env.GCP_PROJECT;
+								const bucketName = configuredBucket || (projId ? `${projId}.appspot.com` : undefined);
+								const bucket = bucketName ? admin.storage().bucket(bucketName) : admin.storage().bucket();
+
+								const file = bucket.file(storagePath);
+								const [exists] = await file.exists();
+								if (!exists) {
+									return res.status(404).json({ error: 'Model image not found at storagePath' });
+								}
+
+								const [metadata] = await file.getMetadata();
+								modelMime = metadata.contentType || 'image/png';
+
+								const [downloadedBuffer] = await file.download();
+								modelBuffer = downloadedBuffer;
 							} catch (e) {
-								console.error('Error fetching model from URL:', e);
-								return res.status(500).json({ error: 'Failed to fetch model image from URL' });
+								console.error('Error downloading model from storage:', e);
+								return res.status(500).json({ error: 'Failed to download model image from storage' });
 							}
 						} else {
-							return res.status(400).json({ error: 'Missing required fields: model_img or modelDownloadUrl' });
+							return res.status(400).json({ error: 'Missing required fields: cropped_img or modelStoragePath' });
 						}
 					}
 
-					// If productBuffer missing, load from URL only (no storagePath support)
+					// product image must be provided as file in multipart
 					if (!productBuffer) {
-						const productDownloadUrl = fields.productDownloadUrl;
-						if (productDownloadUrl) {
-							try {
-								const { buffer, mimeType } = await fetchImageBufferFromUrl(productDownloadUrl);
-								productBuffer = buffer;
-								productMime = mimeType;
-							} catch (e) {
-								console.error('Error fetching product from URL:', e);
-								return res.status(500).json({ error: 'Failed to fetch product image from URL' });
-							}
-						} else {
-							return res.status(400).json({ error: 'Missing required fields: product_img or productDownloadUrl' });
-						}
+						return res.status(400).json({ error: 'Missing required field: product_img (file)' });
 					}
 
 					const out = await generateVirtualModel({
@@ -408,62 +409,8 @@ exports.generateVirtualModel = onRequest(
 					return res.status(200).json(out);
 				}
 
-				// JSON body fallback
-				const body = req.body || {};
-				const mode = String(body.mode || '').trim().toLowerCase();
-				if (!mode || (mode !== 'hold' && mode !== 'wear')) {
-					return res.status(400).json({ error: 'Missing or invalid field: mode (must be hold|wear)' });
-				}
-
-				let modelBase64 = body.modelImageBase64 || body.model_img;
-				let modelMime = body.modelImageMimeType;
-				let productBase64 = body.productImageBase64 || body.product_img;
-				let productMime = body.productImageMimeType;
-
-				// If base64 missing, attempt storagePath or URL
-				if (!modelBase64) {
-					const downloadUrl = body.modelDownloadUrl || body.downloadUrl;
-					if (downloadUrl) {
-						try {
-							const { buffer, mimeType } = await fetchImageBufferFromUrl(downloadUrl);
-							modelBase64 = buffer.toString('base64');
-							modelMime = mimeType;
-						} catch (e) {
-							console.error('Error fetching model from URL:', e);
-							return res.status(500).json({ error: 'Failed to fetch model image from URL' });
-						}
-					} else {
-						return res.status(400).json({ error: 'Missing required fields: modelImageBase64 or modelDownloadUrl' });
-					}
-				}
-
-				if (!productBase64) {
-					const productDownloadUrl = body.productDownloadUrl;
-					if (productDownloadUrl) {
-						try {
-							const { buffer, mimeType } = await fetchImageBufferFromUrl(productDownloadUrl);
-							productBase64 = buffer.toString('base64');
-							productMime = mimeType;
-						} catch (e) {
-							console.error('Error fetching product from URL:', e);
-							return res.status(500).json({ error: 'Failed to fetch product image from URL' });
-						}
-					} else {
-						return res.status(400).json({ error: 'Missing required fields: productImageBase64 or productDownloadUrl' });
-					}
-				}
-
-				const out = await generateVirtualModel({
-					uid,
-					modelImageBase64: modelBase64,
-					modelImageMimeType: modelMime,
-					productImageBase64: productBase64,
-					productImageMimeType: productMime,
-					mode,
-					targetHand: body.targetHand,
-					aspectRatio: body.aspectRatio,
-				});
-				return res.status(200).json(out);
+				// JSON body is not supported for product file upload; instruct clients to use multipart/form-data
+				return res.status(400).json({ error: 'Use multipart/form-data with product_img (file) and either cropped_img (file) or modelStoragePath' });
 			} catch (err) {
 				console.error('generateVirtualModel error:', err?.message || err);
 				return res.status(500).json({ error: 'Internal Server Error' });
