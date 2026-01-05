@@ -21,6 +21,29 @@ let flows = null;
 
 const { createAndUploadThumbnail, computeThumbPath } = require('../operations/thumbnailOperations');
 
+// Prompt building (keep centralized + versioned)
+const REPLACE_IMAGE_PROMPT_VERSION = 'replace-image-v1';
+
+function buildReplaceImagePrompt({ description, aspectRatio }) {
+  // Keep this short and ranked (models follow earlier rules more reliably)
+  const parts = [];
+  parts.push('You are an expert image editor.');
+  parts.push('Task: In image #1 (the template crop), replace the described object/subject using image #2 (the replacement source).');
+  parts.push('Target region: the ENTIRE bounds of image #1. The output must match image #1 canvas exactly (no padding, borders, blank areas, or resizing the canvas).');
+  parts.push('Rules (follow strictly):');
+  parts.push('1) Preserve everything in image #1 except the target object/subject. Do NOT change layout, background graphics, logos, or any text.');
+  parts.push('2) Use ONLY the subject from image #2. Do not invent details that are not present in image #2.');
+  parts.push('3) Fit: COVER the target region with the replacement subject and center-crop as needed. Maintain natural proportions (no stretching). Prefer slight overfill over borders. Never CONTAIN.');
+  parts.push('4) Blend: Keep edges inside the region and softly blend/feather (1–2px). Match lighting direction, color temperature, white balance, and grain/noise. Add realistic shadows/reflections only if consistent with image #1.');
+  parts.push('5) No extras: no stickers/watermarks, no duplicated subjects, no extra objects, no heavy filters, no border artifacts.');
+
+  if (description) parts.push(`Replacement description: ${String(description).trim()}`);
+  // Note: aspectRatio is enforced via model config; keep this line only as a hint.
+  if (aspectRatio) parts.push(`Output aspect ratio hint (also enforced via config): ${String(aspectRatio).trim()}`);
+
+  return parts.join('\n');
+}
+
 async function getReplaceImageFlows() {
 	if (flows) return flows;
 	const { ai, flow, z, googleAI } = await initGenkit();
@@ -57,23 +80,7 @@ async function getReplaceImageFlows() {
 			await ensureUserExists(uid);
 			await decrementUsage(uid, 'generate');
 
-			const parts = [];
-			parts.push('Task: In the first image (template crop), replace the described object/subject using the second image (replacement source).');
-			parts.push('STRICT RULES (follow precisely):');
-			parts.push('- Fit strategy: COVER the target region with the replacement image, then CENTER-CROP so it fills the region with no gaps. Never CONTAIN or shrink to fit inside.');
-			parts.push('- Anchor: Use the TARGET REGION CENTER as the placement anchor. Do NOT anchor to top-left.');
-			parts.push('- Scale/size: The replacement must fill the region naturally (not tiny). Prefer slight overfill to avoid borders.');
-			parts.push('- Rotation: Apply at most one orientation alignment. Do NOT add extra tilt. If the region is angled, prefer subtle perspective/warp alignment rather than stacking rotation twice.');
-			parts.push('- Composition: Preserve original layout and visual hierarchy. Do NOT move or edit unrelated elements.');
-			parts.push('- Lighting & color: Match surrounding lighting, color temperature, white balance, and grain/noise. Add realistic shadows/reflections where needed.');
-			parts.push('- Edges/mask: Keep replacement fully within the region; feather/blend edges subtly (1–2px) to integrate.');
-			parts.push('- Transparency: Preserve and pass through any transparent areas of the base image. Do NOT add checkerboard or flatten alpha.');
-			parts.push('- Non-goals: Do NOT change any texts, logos, or background graphics outside the replacement area.');
-			if (description) {
-				parts.push(`Target replacement description: ${description}.`);
-			}
-			// Aspect ratio applies to the final generated image only and is handled via model config below.
-			const fullPrompt = parts.join('\n');
+			const fullPrompt = buildReplaceImagePrompt({ description, aspectRatio });
 
 			const baseMime = croppedImageMimeType || 'image/png';
 			const newMime = newImageMimeType || 'image/png';
@@ -200,12 +207,14 @@ async function getReplaceImageFlows() {
 					ownerId: uid || null,
 					createdAt: FieldValue.serverTimestamp(),
 					prompt: fullPrompt,
+					promptVersion: REPLACE_IMAGE_PROMPT_VERSION,
 					style: null,
 					aspectRatio: aspectRatio || null,
 					mockupImageUrl: null,
-						mimeType: 'image/png',
+					mimeType: 'image/png',
 					downloadUrl,
 					modelVersion: rawResponse?.modelVersion || null,
+					tool: 'replaceImage',
 					size: buffer.length,
 					thumbUrl: thumbUrl || null,
 					thumbPath,
@@ -216,6 +225,8 @@ async function getReplaceImageFlows() {
 					imageId: id,
 					storagePath: imagePath,
 					type: 'generated',
+					tool: 'replaceImage',
+					promptVersion: REPLACE_IMAGE_PROMPT_VERSION,
 					thumbUrl: thumbUrl || null,
 					thumbPath,
 					thumbSize: 256,
@@ -376,4 +387,3 @@ exports.generateReplaceImage = onRequest(
 		});
 	}
 );
-
