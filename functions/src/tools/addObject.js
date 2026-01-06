@@ -186,21 +186,14 @@ async function getAddObjectFlows() {
 				};
 			}
 
-			// Path B: Gemini fallback with canvas lock
-			const parts = [];
-			parts.push('Task: In the first image (template crop), ADD the object from the second image at the specified location.');
-			parts.push('STRICT RULES (follow precisely):');
-			parts.push('- Canvas lock: OUTPUT WIDTH and HEIGHT MUST MATCH the FIRST IMAGE exactly. No padding, borders, whitespace, or re-layout.');
-			parts.push('- Placement: Place the object centered within the specified target location. Do not shift unrelated elements.');
-			parts.push('- Fit strategy: COVER the target region with the object; allow slight overfill to avoid borders.');
-			parts.push('- Scale: Match natural scale consistent with surrounding context.');
-			parts.push('- Lighting & color: Match ambient lighting, color temperature, white balance, and grain/noise.');
-			parts.push('- Shadows/reflections: Add realistic contact shadows and reflections where appropriate.');
-			parts.push('- Edges/mask: Keep object fully within region; feather/blend edges subtly (1–2px).');
-			parts.push('- Transparency: Preserve any alpha from the base image; do not add checkerboards.');
-			parts.push('- Non-goals: Do NOT modify texts, logos, or background graphics outside the placement area.');
-			parts.push(`Target location description: ${objectLocation}.`);
-			const fullPrompt = parts.join('\n');
+			// Path B: Gemini fallback with concise, high-signal prompt
+			const fullPrompt = [
+				'Output size: exactly match Image 1 (same width and height).',
+				'Add the object from Image 2 into Image 1.',
+				`Target location: ${objectLocation}.`,
+				'Edit only the target region; preserve everything else.',
+				'Match lighting, color balance, and shadows.',
+			].join('\n');
 
 			const baseMime = croppedImageMimeType || 'image/png';
 			const objMime = objectImageMimeType || 'image/png';
