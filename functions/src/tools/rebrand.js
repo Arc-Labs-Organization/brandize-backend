@@ -472,13 +472,8 @@ async function getRebrandFlows() {
         '- **Fields that have a valid value,** must appear **at least once** in either **“updated_texts”** or **“additions.”**',
         '    - If you can replace original text with a context-appropriate and similarly sized version, do so in **“updated_texts.”**',
         '    - If no suitable replacement exists, add the content to “additions” with a strict object per entry containing: **type**, and **location**.',
-        '      - **type** must be one of: `"phone" | "website" | "brand_name" | "brand_address" | "brand_logo"`.',
+        '      - **type** must be one of: `"phone" | "website" | "brand_name" | "brand_address".',
         '      - **location** must be one of exactly: `"bottom-right"`, `"bottom-left"`, `"bottom-mid"`, `"top-left"`, `"top-mid"`, `"top-right"`. Do not use synonyms like "left-bottom" or "center-bottom".',
-        '',
-        '- **Logo Guidance:**',
-        '    - If the image contains a logo that can be swapped out, set `replacable_logo: true` and prefer using the brand logo as a replacement (do not add a separate logo in additions).',
-        '    - If the image does not contain a replaceable logo (`replacable_logo: false`), but a valid brand logo URL is present in the table (e.g., `logoUrl`), add one entry in `additions` with `type: "brand_logo"` and choose a location that is least cluttered (typically a corner like `bottom-right`).',
-        '    - Keep the composition balanced; avoid overlapping major texts and maintain contrast against the background.',
         '',
         '**Task:**',
         '',
@@ -566,7 +561,7 @@ async function getRebrandFlows() {
           updated_texts: z.array(z.string().nullable()),
           additions: z.array(
             z.object({
-              type: z.enum(['phone', 'website', 'brand_name', 'brand_address', 'brand_logo']),
+              type: z.enum(['phone', 'website', 'brand_name', 'brand_address']),
               location: z.enum([
                 'bottom-left',
                 'bottom-mid',
