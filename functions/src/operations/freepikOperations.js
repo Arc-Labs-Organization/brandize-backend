@@ -166,6 +166,9 @@ exports.freepikSearch = onRequest(
         return res.status(200).json(json);
       } catch (err) {
         console.error('freepikSearch error:', err);
+        if (err instanceof Error) {
+          console.error(err.stack);
+        }
         return res
           .status(500)
           .json({ error: 'Failed to fetch from Freepik', details: String(err?.message || err) });
@@ -228,7 +231,15 @@ exports.freepikDownload = onRequest(
       try {
         // Ensure user exists and decrement download usage
         await ensureUserExists(uid);
-        await decrementUsage(uid, 'download');
+        try {
+          await decrementUsage(uid, 'download');
+        } catch (error) {
+          if (error.message && (error.message.includes('No remaining') || error.message.includes('usage available'))) {
+            console.warn(`User ${uid} exceeded download quota.`);
+            return res.status(403).json({ error: 'Quota Exceeded', details: error.message });
+          }
+          throw error;
+        }
 
         const apiUrl = new URL(
           `https://api.freepik.com/v1/resources/${encodeURIComponent(resourceId)}/download`,
@@ -395,6 +406,9 @@ exports.freepikDownload = onRequest(
           .json({ imageId: resourceId, storagePath, downloadUrl: signedUrl, type: 'downloaded' });
       } catch (err) {
         console.error('freepikDownload error:', err);
+        if (err instanceof Error) {
+          console.error(err.stack);
+        }
         return res
           .status(500)
           .json({ error: 'Failed to download from Freepik', details: String(err?.message || err) });
@@ -454,9 +468,15 @@ exports.freepikDownloadTemplate = onRequest(
 
         // Ensure user exists and decrement download usage
         await ensureUserExists(uid);
+      try {
         await decrementUsage(uid, 'download');
-        logTime('User Accounting (Firestore)');
-
+      } catch (error) {
+        if (error.message && (error.message.includes('No remaining') || error.message.includes('usage available'))) {
+          console.warn(`User ${uid} exceeded download quota.`);
+          return res.status(403).json({ error: 'Quota Exceeded', details: error.message });
+        }
+        throw error;
+      }
         // Check if template is already processed
         const existingDocRef = db.collection('images').doc(resourceId);
         const existingDoc = await existingDocRef.get();
@@ -829,6 +849,10 @@ exports.freepikDownloadTemplate = onRequest(
 
       } catch (err) {
         console.error('freepikDownloadTemplate error:', err);
+        // Include stack trace in logs (automatically handled by console.error usually, but good to be explicit for simple objects)
+        if (err instanceof Error) {
+            console.error(err.stack);
+        }
         return res.status(500).json({ error: 'Internal Server Error', details: err.message });
       }
     });
@@ -886,6 +910,9 @@ exports.getDownloadedThumbnails = onRequest(
         return res.status(200).json({ thumbnails });
       } catch (err) {
         console.error('getDownloadedThumbnails error:', err);
+        if (err instanceof Error) {
+          console.error(err.stack);
+        }
         return res.status(500).json({ error: 'Internal Server Error', details: err.message });
       }
     });
@@ -1027,6 +1054,9 @@ exports.getDownloadedAssets = onRequest(
 
       } catch (err) {
         console.error('getDownloadedAssets error:', err);
+        if (err instanceof Error) {
+          console.error(err.stack);
+        }
         return res.status(500).json({ error: 'Internal Server Error', details: err.message });
       }
     });
