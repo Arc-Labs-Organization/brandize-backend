@@ -61,3 +61,7 @@ const { getDownloadedImages, getCreatedImages, userInfo } = require('./src/opera
 exports.getDownloadedImages = getDownloadedImages;
 exports.getCreatedImages = getCreatedImages;
 exports.userInfo = userInfo;
+
+// Import and export Apple Device Trial Verification
+const { verifyAppleDeviceTrial } = require('./src/operations/deviceTrial');
+exports.verifyAppleDeviceTrial = verifyAppleDeviceTrial;
