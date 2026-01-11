@@ -3,4 +3,5 @@
 .env.*
 # Keep local env files and deps out of git
 .env.local
+prod.env
 node_modules/

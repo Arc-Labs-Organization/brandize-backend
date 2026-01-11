@@ -1,10 +1,11 @@
 const admin = require('firebase-admin');
 const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 const { onCall, HttpsError } = require('firebase-functions/v2/https');
-const functions = require('firebase-functions');
+const logger = require('firebase-functions/logger');
 const axios = require('axios');
 const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
+const { defineSecret, defineString } = require('firebase-functions/params');
 
 try {
   if (!admin.apps.length) {
@@ -16,21 +17,64 @@ try {
 
 const db = getFirestore();
 
+function normalizePemPrivateKey(raw) {
+  const asString = String(raw ?? '');
+  if (!asString) return asString;
+
+  // If secret was pasted with literal "\n", convert to actual newlines.
+  let key = asString.replace(/\\n/g, '\n').trim();
+
+  // If it's a PEM but collapsed to one line, reformat it.
+  const beginMarker = '-----BEGIN PRIVATE KEY-----';
+  const endMarker = '-----END PRIVATE KEY-----';
+  const hasMarkers = key.includes(beginMarker) && key.includes(endMarker);
+  const hasAnyNewlines = key.includes('\n') || key.includes('\r');
+
+  if (hasMarkers && !hasAnyNewlines) {
+    const body = key
+      .replace(beginMarker, '')
+      .replace(endMarker, '')
+      .replace(/\s+/g, '');
+    const wrapped = body.match(/.{1,64}/g)?.join('\n') ?? body;
+    key = `${beginMarker}\n${wrapped}\n${endMarker}`;
+  }
+
+  return key;
+}
+
+// Params (non-secret). These replace functions.config() (deprecated March 2026).
+const APPLE_KEY_ID = defineString('APPLE_KEY_ID');
+const APPLE_TEAM_ID = defineString('APPLE_TEAM_ID');
+// For Xcode/dev-signed installs use: https://api.development.devicecheck.apple.com
+// For TestFlight/App Store use:      https://api.devicecheck.apple.com
+const APPLE_DEVICECHECK_BASE_URL = defineString('APPLE_DEVICECHECK_BASE_URL', {
+  default: 'https://api.devicecheck.apple.com',
+});
+
+//Use the base URL shown in the example curl commands—that is, https://api.development.devicecheck.apple.com—only for testing during development. When you’re ready to transition to a production environment, you must use the production base URL https://api.devicecheck.apple.com. 
+
+// Secret (p8 content)
+const APPLE_PRIVATE_KEY = defineSecret('APPLE_PRIVATE_KEY');
+
 /**
  * verifyAppleDeviceTrial
  * Callable Cloud Function (Gen 2) to verify an Apple DeviceCheck token
  * and grant a one-time free trial per device.
  *
  * Requirements:
- * - Secrets: APPLE_PRIVATE_KEY (p8 content)
- * - Config: functions.config().apple.key_id, functions.config().apple.team_id
+ * - Secret: APPLE_PRIVATE_KEY (p8 content)
+ * - Params: APPLE_KEY_ID, APPLE_TEAM_ID, APPLE_DEVICECHECK_BASE_URL
  */
 const verifyAppleDeviceTrial = onCall({
   region: 'europe-west1',
-  // Declare secret for Gen 2; still read via process.env
-  secrets: ['APPLE_PRIVATE_KEY'],
+  secrets: [APPLE_PRIVATE_KEY],
 }, async (request) => {
   const context = request;
+  const startedAt = Date.now();
+  const trace =
+    (context.rawRequest && context.rawRequest.headers && (context.rawRequest.headers['x-cloud-trace-context'] || context.rawRequest.headers['X-Cloud-Trace-Context'])) ||
+    undefined;
+  const traceId = typeof trace === 'string' ? trace.split('/')[0] : undefined;
 
   // Enforce authentication
   if (!context.auth || !context.auth.uid) {
@@ -40,27 +84,42 @@ const verifyAppleDeviceTrial = onCall({
   const uid = context.auth.uid;
   const inputToken = request.data && request.data.inputToken;
 
+  logger.info('verifyAppleDeviceTrial:start', {
+    uid,
+    traceId,
+    hasInputToken: typeof inputToken === 'string' && inputToken.length > 0,
+    inputTokenLen: typeof inputToken === 'string' ? inputToken.length : 0,
+  });
+
   if (!inputToken || typeof inputToken !== 'string') {
     throw new HttpsError('invalid-argument', 'Missing or invalid "inputToken".');
   }
 
   // Load Apple credentials
-  const cfg = functions.config() || {};
-  const keyId = (cfg.apple && cfg.apple.key_id) || process.env.APPLE_KEY_ID; // fallback if set via env
-  const teamId = (cfg.apple && cfg.apple.team_id) || process.env.APPLE_TEAM_ID; // fallback if set via env
-  const privateKey = process.env.APPLE_PRIVATE_KEY.replace(/\\n/g, '\n');
+  const keyId = APPLE_KEY_ID.value();
+  const teamId = APPLE_TEAM_ID.value();
+  const rawPrivateKey = APPLE_PRIVATE_KEY.value();
 
-  if (!keyId || !teamId || !privateKey) {
-    console.error('Apple config missing', { hasKeyId: !!keyId, hasTeamId: !!teamId, hasPrivateKey: !!privateKey });
+  if (!keyId || !teamId || !rawPrivateKey) {
+    logger.error('verifyAppleDeviceTrial:apple_config_missing', {
+      uid,
+      traceId,
+      hasKeyId: !!keyId,
+      hasTeamId: !!teamId,
+      hasPrivateKey: !!rawPrivateKey,
+    });
     throw new HttpsError('failed-precondition', 'Apple DeviceCheck configuration missing.');
   }
 
+  const privateKey = normalizePemPrivateKey(rawPrivateKey);
+
   // Create JWT for Apple DeviceCheck (ES256)
   const iatSeconds = Math.floor(Date.now() / 1000);
+  const expSeconds = iatSeconds + (20 * 60); // 20 minutes
   let authToken;
   try {
     authToken = jwt.sign(
-      { iss: teamId, iat: iatSeconds },
+      { iss: teamId, iat: iatSeconds, exp: expSeconds },
       privateKey,
       {
         algorithm: 'ES256',
@@ -68,7 +127,12 @@ const verifyAppleDeviceTrial = onCall({
       },
     );
   } catch (e) {
-    console.error('JWT sign error:', e);
+    logger.error('verifyAppleDeviceTrial:jwt_sign_error', {
+      uid,
+      traceId,
+      message: e && e.message,
+      stack: e && e.stack,
+    });
     throw new HttpsError('internal', 'Failed to generate Apple auth token.');
   }
 
@@ -77,12 +141,17 @@ const verifyAppleDeviceTrial = onCall({
     'Content-Type': 'application/json',
   };
 
-  // Dynamic Apple DeviceCheck base URL (config/env with safe default)
-  const appleCfg = (cfg.apple || {});
-  const rawBaseUrl = appleCfg.devicecheck_base_url || process.env.APPLE_DEVICECHECK_BASE_URL || 'https://api.devicecheck.apple.com';
-  const baseUrl = String(rawBaseUrl).replace(/\/+$/, ''); // trim trailing slashes
+  // Apple DeviceCheck base URL
+  const rawBaseUrl = APPLE_DEVICECHECK_BASE_URL.value();
+  const baseUrl = String(rawBaseUrl).trim().replace(/\/+$/, ''); // trim trailing slashes
   const queryUrl = `${baseUrl}/v1/query_two_bits`;
   const updateUrl = `${baseUrl}/v1/update_two_bits`;
+
+  logger.info('verifyAppleDeviceTrial:apple_endpoints', {
+    uid,
+    traceId,
+    baseUrl,
+  });
 
   // Step 1: Query two bits
   const transactionId1 = uuidv4();
@@ -112,48 +181,150 @@ const verifyAppleDeviceTrial = onCall({
     } else if (data.bitStates && typeof data.bitStates.second !== 'undefined') {
       bit1Val = data.bitStates.second ? 1 : 0;
     }
+
+    logger.info('verifyAppleDeviceTrial:query_two_bits_ok', {
+      uid,
+      traceId,
+      transactionId: transactionId1,
+      bit0: bit0Val,
+      bit1: bit1Val,
+      status: queryResp && queryResp.status,
+    });
   } catch (e) {
     const status = e.response && e.response.status;
     const body = e.response && e.response.data;
-    console.error('Apple query_two_bits error:', { status, body, error: e.message });
+    logger.error('verifyAppleDeviceTrial:query_two_bits_error', {
+      uid,
+      traceId,
+      transactionId: transactionId1,
+      status,
+      body,
+      message: e && e.message,
+    });
     throw new HttpsError('internal', 'Failed to query device trial state.');
   }
 
   // If already claimed on device
   if (bit0Val === 1) {
+    logger.info('verifyAppleDeviceTrial:already_claimed_device', { uid, traceId });
     throw new HttpsError('permission-denied', 'Trial already claimed on this device');
   }
 
-  // Step 2: Grant trial credits
+  // If bit1 is set, treat as "in progress" / locked to reduce double-claims.
+  if (bit1Val === 1) {
+    logger.info('verifyAppleDeviceTrial:already_in_progress', { uid, traceId });
+    throw new HttpsError('permission-denied', 'Trial claim already in progress on this device');
+  }
+
+  // Step 2: Acquire lock using bit1=true (best-effort race reduction)
+  try {
+    await axios.post(
+      updateUrl,
+      {
+        device_token: inputToken,
+        transaction_id: uuidv4(),
+        timestamp: Date.now(),
+        bit0: false,
+        bit1: true,
+      },
+      { headers },
+    );
+
+    logger.info('verifyAppleDeviceTrial:lock_acquired', { uid, traceId });
+  } catch (e) {
+    const status = e.response && e.response.status;
+    const body = e.response && e.response.data;
+    logger.error('verifyAppleDeviceTrial:lock_error', {
+      uid,
+      traceId,
+      status,
+      body,
+      message: e && e.message,
+    });
+    throw new HttpsError('internal', 'Failed to reserve device trial state.');
+  }
+
+  // Step 3: Grant trial credits (idempotent per uid)
+  const incrementBy = 50;
+  let creditsGranted = 0;
   try {
     const userRef = db.collection('users').doc(uid);
 
     await db.runTransaction(async (tx) => {
       const snap = await tx.get(userRef);
       const exists = snap.exists;
-      const incrementBy = 50;
+      const data = snap.data() || {};
+      const alreadyClaimed = data.hasClaimedTrial === true;
+
+      if (alreadyClaimed) {
+        creditsGranted = 0;
+        tx.set(userRef, { lastUsedAt: FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+
+      creditsGranted = incrementBy;
 
       if (!exists) {
-        tx.set(userRef, {
-          hasClaimedTrial: true,
-          credits: incrementBy,
-          createdAt: FieldValue.serverTimestamp(),
-          lastUsedAt: FieldValue.serverTimestamp(),
-        }, { merge: true });
+        tx.set(
+          userRef,
+          {
+            hasClaimedTrial: true,
+            trialClaimedAt: FieldValue.serverTimestamp(),
+            trialProvider: 'devicecheck',
+            remainingUsage: {
+              download: 0,
+              generate: incrementBy,
+            },
+            createdAt: FieldValue.serverTimestamp(),
+            lastUsedAt: FieldValue.serverTimestamp(),
+          },
+          { merge: true },
+        );
       } else {
         tx.update(userRef, {
           hasClaimedTrial: true,
-          credits: FieldValue.increment(incrementBy),
+          trialClaimedAt: FieldValue.serverTimestamp(),
+          trialProvider: 'devicecheck',
+          'remainingUsage.generate': FieldValue.increment(incrementBy),
           lastUsedAt: FieldValue.serverTimestamp(),
         });
       }
     });
+
+    logger.info('verifyAppleDeviceTrial:firestore_grant_ok', {
+      uid,
+      traceId,
+      creditsGranted,
+      incrementBy,
+      durationMs: Date.now() - startedAt,
+    });
   } catch (e) {
-    console.error('Firestore grant error:', e);
+    logger.error('verifyAppleDeviceTrial:firestore_grant_error', {
+      uid,
+      traceId,
+      message: e && e.message,
+      stack: e && e.stack,
+    });
+
+    // Best-effort: release lock so the device isn't stuck.
+    try {
+      await axios.post(
+        updateUrl,
+        {
+          device_token: inputToken,
+          transaction_id: uuidv4(),
+          timestamp: Date.now(),
+          bit0: false,
+          bit1: false,
+        },
+        { headers },
+      );
+    } catch (_) {}
+
     throw new HttpsError('internal', 'Failed to grant trial credits.');
   }
 
-  // Step 3: Update two bits (mark bit0 true)
+  // Step 4: Finalize bits (bit0=true, bit1=false)
   const transactionId2 = uuidv4();
   try {
     await axios.post(
@@ -170,12 +341,26 @@ const verifyAppleDeviceTrial = onCall({
   } catch (e) {
     const status = e.response && e.response.status;
     const body = e.response && e.response.data;
-    console.error('Apple update_two_bits error:', { status, body, error: e.message });
-    // Do not revoke credits; report but return success as credits already granted.
-    return { ok: true, creditsGranted: 50, note: 'Credits granted; device state update failed.' };
+    logger.error('verifyAppleDeviceTrial:finalize_error', {
+      uid,
+      traceId,
+      transactionId: transactionId2,
+      status,
+      body,
+      message: e && e.message,
+    });
+    // Do not revoke credits; report but return success as credits may already be granted.
+    return { ok: true, creditsGranted, note: 'Trial processed; device state finalize failed.' };
   }
 
-  return { ok: true, creditsGranted: 50 };
+  logger.info('verifyAppleDeviceTrial:success', {
+    uid,
+    traceId,
+    creditsGranted,
+    durationMs: Date.now() - startedAt,
+  });
+
+  return { ok: true, creditsGranted };
 });
 
 module.exports = { verifyAppleDeviceTrial };
