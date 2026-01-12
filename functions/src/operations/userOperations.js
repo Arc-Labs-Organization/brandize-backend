@@ -3,6 +3,7 @@ const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 const { onRequest } = require('firebase-functions/v2/https');
 const cors = require('cors')({ origin: true });
 const { verifyAuth } = require('../common/utils');
+const { SUBSCRIPTION_TIERS } = require('../common/subscriptionConfig');
 
 try {
   if (!admin.apps.length) {
@@ -26,17 +27,28 @@ async function ensureUserExists(uid) {
   if (!userDoc.exists) {
     // Create user with default values
     await userRef.set({
-      trialCreditsRemaining: 0,
+      subscription: {
+        status: 'free',
+        isActive: false,
+        currentPeriodEnd: null,
+        provider: null,
+      },
+      monthlyAllowance: {
+        downloadLimit: 0,
+        generateLimit: 0,
+        downloadsUsed: 0,
+        generationsUsed: 0,
+      },
       freeCredits: {
         generate: 0,
         download: 0,
       },
+      // Deprecated fields kept for strict safety if needed, but not primarily used anymore
       remainingUsage: {
-        // Free users should have NO paid credits by default.
-        // Trial credits are granted into freeCredits via DeviceCheck claim.
         download: 0,
         generate: 0,
       },
+      trialCreditsRemaining: 0,
       createdAt: FieldValue.serverTimestamp(),
       lastUsedAt: FieldValue.serverTimestamp(),
     });
@@ -67,90 +79,163 @@ async function decrementUsage(uid, usageType) {
     }
 
     const userData = userDoc.data();
-    const remainingUsage = userData.remainingUsage || {};
-    const subStatus = userData.subStatus === 'pro' ? 'pro' : 'free';
-    // Enforce: free plan has no paid credits; only freeCredits/trial may be consumed.
-    const paidRemaining = subStatus === 'pro' ? (Number(remainingUsage[usageType]) || 0) : 0;
-
-    // freeCredits are consumed first. Legacy support: if freeCredits.generate is not present
-    // but trialCreditsRemaining exists, treat it as free generate credits.
-    const rawFreeCredits = userData.freeCredits;
-    const freeCreditsIsMap =
-      rawFreeCredits && typeof rawFreeCredits === 'object' && !Array.isArray(rawFreeCredits);
-    const freeCredits = freeCreditsIsMap ? rawFreeCredits : {};
-
-    const legacyTrialGenerate = usageType === 'generate' ? (Number(userData.trialCreditsRemaining) || 0) : 0;
-
-    // Determine which bucket we are consuming from.
-    // If `freeCredits` is malformed in Firestore (non-map), nested updates like
-    // `freeCredits.generate` will throw. We detect and repair it.
-    const hasFreeField = Object.prototype.hasOwnProperty.call(freeCredits, usageType);
-    const mappedFreeRemaining = hasFreeField ? Math.max(0, Number(freeCredits[usageType]) || 0) : 0;
-    const scalarFreeRemaining =
-      !freeCreditsIsMap && typeof rawFreeCredits === 'number' && Number.isFinite(rawFreeCredits)
-        ? Math.max(0, rawFreeCredits)
-        : 0;
-
-    const freeRemaining = mappedFreeRemaining > 0
-      ? mappedFreeRemaining
-      : (legacyTrialGenerate > 0 ? legacyTrialGenerate : scalarFreeRemaining);
-
-    const totalRemaining = paidRemaining + freeRemaining;
-    if (totalRemaining <= 0) {
-      throw new Error(`No remaining ${usageType} usage available`);
-    }
-
-    const update = {
-      lastUsedAt: FieldValue.serverTimestamp(),
+    
+    // 1. Check Monthly Allowance first
+    const subscription = userData.subscription || {};
+    const monthlyAllowance = userData.monthlyAllowance || { 
+      downloadLimit: 0, generateLimit: 0, downloadsUsed: 0, generationsUsed: 0 
     };
 
-    if (freeRemaining > 0) {
-      if (mappedFreeRemaining > 0 && hasFreeField) {
-        // Normal path: freeCredits is a map and has the required field.
-        // Use an explicit numeric write (not FieldValue.increment) so we can self-heal
-        // cases where `freeCredits.generate` was accidentally stored as a string.
-        update[`freeCredits.${usageType}`] = Math.max(0, mappedFreeRemaining - 1);
-        transaction.update(userRef, update);
-        return totalRemaining - 1;
-      }
+    const isSubActive = subscription.isActive === true;
+    const limitKey = `${usageType}Limit`;
+    const usedKey = `${usageType}sUsed`; // downloadsUsed or generationsUsed
 
-      if (legacyTrialGenerate > 0 && usageType === 'generate') {
-        // Legacy fallback: older installs stored free generate credits in trialCreditsRemaining.
-        // Explicit numeric write to avoid increment errors if the field is not a number.
-        update.trialCreditsRemaining = Math.max(0, legacyTrialGenerate - 1);
-        transaction.update(userRef, update);
-        return totalRemaining - 1;
-      }
+    const limit = Number(monthlyAllowance[limitKey]) || 0;
+    const used = Number(monthlyAllowance[usedKey]) || 0;
+    const monthlyRemaining = Math.max(0, limit - used);
 
-      if (scalarFreeRemaining > 0) {
-        // Best-effort repair: if freeCredits was accidentally stored as a scalar, convert it to a map
-        // so future decrements work, then decrement the appropriate field.
-        const nextFreeCredits = {
-          generate: usageType === 'generate' ? Math.max(0, scalarFreeRemaining - 1) : 0,
-          download: usageType === 'download' ? Math.max(0, scalarFreeRemaining - 1) : 0,
-        };
-        transaction.set(
-          userRef,
-          {
-            freeCredits: nextFreeCredits,
-            lastUsedAt: FieldValue.serverTimestamp(),
-          },
-          { merge: true },
-        );
-        return totalRemaining - 1;
-      }
-
-      // If we got here, we believed there were free credits but couldn't safely identify a field.
-      // Fall back to paid decrement to avoid throwing internal errors.
-      update[`remainingUsage.${usageType}`] = Math.max(0, paidRemaining - 1);
-    } else {
-      update[`remainingUsage.${usageType}`] = Math.max(0, paidRemaining - 1);
+    if (isSubActive && monthlyRemaining > 0) {
+      // Consume from monthly allowance
+      transaction.update(userRef, {
+        [`monthlyAllowance.${usedKey}`]: FieldValue.increment(1),
+        lastUsedAt: FieldValue.serverTimestamp(),
+      });
+      // Return total remaining (monthly + free)
+      const freeRemaining = (userData.freeCredits && userData.freeCredits[usageType]) || 0;
+      return (monthlyRemaining - 1) + freeRemaining; 
     }
 
-    transaction.update(userRef, update);
-    return totalRemaining - 1; // new total remaining
+    // 2. Fallback to Free Credits
+    const freeCredits = userData.freeCredits || {};
+    // Handle legacy formats if present, but prioritize map
+    const freeRemaining = Number(freeCredits[usageType]) || 0;
+
+    // Handle legacy trialCreditsRemaining for 'generate' if not in freeCredits
+    const legacyTrial = (usageType === 'generate' && !freeCredits.generate) 
+      ? (Number(userData.trialCreditsRemaining) || 0) 
+      : 0;
+    
+    const actualFreeRemaining = Math.max(freeRemaining, legacyTrial);
+
+    if (actualFreeRemaining > 0) {
+       // Consume free credit
+       const update = {
+         lastUsedAt: FieldValue.serverTimestamp(),
+       };
+       
+       if (freeRemaining > 0) {
+         update[`freeCredits.${usageType}`] = actualFreeRemaining - 1;
+       } else if (legacyTrial > 0) {
+         update.trialCreditsRemaining = actualFreeRemaining - 1;
+         // Also verify if we should migrate this to freeCredits structure
+       }
+       
+       transaction.update(userRef, update);
+       return actualFreeRemaining - 1;
+    }
+
+    // 3. No credits left
+    throw new Error(`No remaining ${usageType} usage available`);
   });
 }
+
+/**
+ * Get user info and remaining usage.
+ * GET /userInfo
+ * Auth: Authorization: Bearer <idToken>
+ * Firestore: users/{uid}
+ * Response:
+ * {
+ *   remainingDownload: number,
+ *   remainingGenerate: number,
+ *   monthlyAllowance: { ... },
+ *   freeCredits: { ... },
+ *   subStatus: 'free' | 'starter' | 'pro' | 'max'
+ * }
+ */
+const userInfo = onRequest(
+  {
+    region: 'europe-west1',
+    cors: true,
+  },
+  async (req, res) => {
+    // Handle CORS preflight
+    if (req.method === 'OPTIONS') {
+      res.set('Access-Control-Allow-Origin', '*');
+      res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
+      res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+      return res.status(204).send('');
+    }
+
+    return cors(req, res, async () => {
+      if (req.method !== 'GET') {
+        return res.status(405).json({ error: 'Method not allowed. Use GET.' });
+      }
+
+      let uid;
+      try {
+        uid = await verifyAuth(req);
+      } catch (e) {
+        return res.status(401).json({ error: e.message });
+      }
+
+      try {
+        // Ensure user doc exists (server-side authority)
+        await ensureUserExists(uid);
+
+        const userRef = db.collection('users').doc(uid);
+        const snap = await userRef.get();
+        const data = snap.data() || {};
+
+        const subscription = data.subscription || {};
+        const monthlyAllowance = data.monthlyAllowance || {
+          downloadLimit: 0, generateLimit: 0, downloadsUsed: 0, generationsUsed: 0
+        };
+        const freeCredits = data.freeCredits || {};
+
+        // Calculate Monthly Remaining
+        const monthlyDownloadsRemaining = Math.max(0, (monthlyAllowance.downloadLimit || 0) - (monthlyAllowance.downloadsUsed || 0));
+        const monthlyGenerationsRemaining = Math.max(0, (monthlyAllowance.generateLimit || 0) - (monthlyAllowance.generationsUsed || 0));
+
+        // Calculate Free Remaining
+        // Legacy fallback
+        const freeGenerate = Number.isFinite(freeCredits.generate)
+          ? Math.max(0, freeCredits.generate)
+          : Math.max(0, Number(data.trialCreditsRemaining) || 0);
+        const freeDownload = Number.isFinite(freeCredits.download)
+          ? Math.max(0, freeCredits.download)
+          : 0;
+
+        // Total
+        // Only count monthly remaining if subscription is active
+        const isSubActive = subscription.isActive === true;
+        
+        const totalRemainingDownload = (isSubActive ? monthlyDownloadsRemaining : 0) + freeDownload;
+        const totalRemainingGenerate = (isSubActive ? monthlyGenerationsRemaining : 0) + freeGenerate;
+
+        return res.status(200).json({
+          remainingDownload: totalRemainingDownload,
+          remainingGenerate: totalRemainingGenerate,
+          monthlyAllowance: {
+            ...monthlyAllowance,
+            remainingDownload: monthlyDownloadsRemaining,
+            remainingGenerate: monthlyGenerationsRemaining
+          },
+          freeCredits: {
+            generate: freeGenerate,
+            download: freeDownload,
+          },
+          subscriptionStatus: subscription.status || 'free',
+          // Back-compat
+          subStatus: subscription.status || 'free',
+        });
+      } catch (error) {
+        console.error('Error in userInfo:', error);
+        return res.status(500).json({ error: 'Internal Server Error', details: error.message });
+      }
+    });
+  },
+);
 
 /**
  * Get user's downloaded images.
@@ -306,111 +391,4 @@ const getCreatedImages = onRequest(
   },
 );
 
-module.exports = { ensureUserExists, decrementUsage, getDownloadedImages, getCreatedImages };
-
-/**
- * Get user info and remaining usage.
- * GET /userInfo
- * Auth: Authorization: Bearer <idToken>
- * Firestore: users/{uid}
- * Response:
- * {
- *   remainingDownload: number,
- *   remainingGenerate: number,
- *   subStatus: 'free' | 'pro'
- * }
- */
-const userInfo = onRequest(
-  {
-    region: 'europe-west1',
-    cors: true,
-  },
-  async (req, res) => {
-    // Handle CORS preflight
-    if (req.method === 'OPTIONS') {
-      res.set('Access-Control-Allow-Origin', '*');
-      res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
-      res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-      return res.status(204).send('');
-    }
-
-    return cors(req, res, async () => {
-      if (req.method !== 'GET') {
-        return res.status(405).json({ error: 'Method not allowed. Use GET.' });
-      }
-
-      let uid;
-      try {
-        uid = await verifyAuth(req);
-      } catch (e) {
-        return res.status(401).json({ error: e.message });
-      }
-
-      try {
-        // Ensure user doc exists (server-side authority)
-        await ensureUserExists(uid);
-
-        const userRef = db.collection('users').doc(uid);
-        const snap = await userRef.get();
-        const data = snap.data() || {};
-
-        // Determine subscription status (default to free)
-        const subStatus = data.subStatus === 'pro' ? 'pro' : 'free';
-
-        // Plan limits (env-configurable; safe defaults)
-        // Free plan: no included credits. Trial credits are tracked in freeCredits.
-        const FREE_DOWNLOAD_LIMIT = parseInt(process.env.FREE_DOWNLOAD_LIMIT || '0', 10);
-        const FREE_GENERATE_LIMIT = parseInt(process.env.FREE_GENERATE_LIMIT || '0', 10);
-        const PRO_DOWNLOAD_LIMIT = parseInt(process.env.PRO_DOWNLOAD_LIMIT || '100', 10);
-        const PRO_GENERATE_LIMIT = parseInt(process.env.PRO_GENERATE_LIMIT || '100', 10);
-
-        const planDownloadLimit = subStatus === 'pro' ? PRO_DOWNLOAD_LIMIT : FREE_DOWNLOAD_LIMIT;
-        const planGenerateLimit = subStatus === 'pro' ? PRO_GENERATE_LIMIT : FREE_GENERATE_LIMIT;
-
-        // Prefer server-managed remainingUsage if present; else derive from usage counters
-        const remainingUsage = data.remainingUsage || {};
-        const usageCounters = data.usage || {};
-
-        const freeCredits = data.freeCredits || {};
-        const freeGenerate = Number.isFinite(freeCredits.generate)
-          ? Math.max(0, freeCredits.generate)
-          : Math.max(0, Number(data.trialCreditsRemaining) || 0);
-        const freeDownload = Number.isFinite(freeCredits.download)
-          ? Math.max(0, freeCredits.download)
-          : 0;
-
-        const computedPaidRemainingDownload = Number.isFinite(remainingUsage.download)
-          ? Math.max(0, remainingUsage.download)
-          : Math.max(0, planDownloadLimit - (Number(usageCounters.download) || 0));
-
-        const computedPaidRemainingGenerate = Number.isFinite(remainingUsage.generate)
-          ? Math.max(0, remainingUsage.generate)
-          : Math.max(0, planGenerateLimit - (Number(usageCounters.generate) || 0));
-
-        // Enforce: free plan has no paid credits.
-        const remainingDownload = subStatus === 'pro' ? computedPaidRemainingDownload : 0;
-        const remainingGenerate = subStatus === 'pro' ? computedPaidRemainingGenerate : 0;
-
-        const totalRemainingDownload = remainingDownload + freeDownload;
-        const totalRemainingGenerate = remainingGenerate + freeGenerate;
-
-        return res.status(200).json({
-          remainingDownload: totalRemainingDownload,
-          remainingGenerate: totalRemainingGenerate,
-          // Back-compat: keep old field name, mapped to free generate credits
-          trialCreditsRemaining: freeGenerate,
-          freeCredits: {
-            generate: freeGenerate,
-            download: freeDownload,
-          },
-          subStatus,
-        });
-      } catch (error) {
-        console.error('Error in userInfo:', error);
-        return res.status(500).json({ error: 'Internal Server Error', details: error.message });
-      }
-    });
-  },
-);
-
-module.exports.userInfo = userInfo;
+module.exports = { ensureUserExists, decrementUsage, getDownloadedImages, getCreatedImages, userInfo };

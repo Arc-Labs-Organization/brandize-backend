@@ -70,3 +70,9 @@ exports.resetAppleDeviceTrialDev = resetAppleDeviceTrialDev;
 // Import and export Trial Credits Restore (device-level restore id)
 const { restoreTrialCredits } = require('./src/operations/trialRestore');
 exports.restoreTrialCredits = restoreTrialCredits;
+
+// Import and export Subscription Operations
+const { revenueCatWebhook } = require('./src/operations/subscriptionWebhook');
+const { syncSubscription } = require('./src/operations/syncSubscription');
+exports.revenueCatWebhook = revenueCatWebhook;
+exports.syncSubscription = syncSubscription;
