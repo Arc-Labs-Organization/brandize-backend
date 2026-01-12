@@ -63,5 +63,10 @@ exports.getCreatedImages = getCreatedImages;
 exports.userInfo = userInfo;
 
 // Import and export Apple Device Trial Verification
-const { verifyAppleDeviceTrial } = require('./src/operations/deviceTrial');
+const { verifyAppleDeviceTrial, resetAppleDeviceTrialDev } = require('./src/operations/deviceTrial');
 exports.verifyAppleDeviceTrial = verifyAppleDeviceTrial;
+exports.resetAppleDeviceTrialDev = resetAppleDeviceTrialDev;
+
+// Import and export Trial Credits Restore (device-level restore id)
+const { restoreTrialCredits } = require('./src/operations/trialRestore');
+exports.restoreTrialCredits = restoreTrialCredits;

@@ -486,25 +486,18 @@ exports.freepikDownloadTemplate = onRequest(
           const imgData = existingDoc.data();
 
           let uploadedFiles = [];
-          if (imgData.files && Array.isArray(imgData.files)) {
-            uploadedFiles = imgData.files;
-          } else {
-            // Fallback: List files from storage if 'files' array is missing in Firestore
-            const prefix = `images/common/${resourceId}/`;
-            const [files] = await bucket.getFiles({ prefix });
-
-            const filePromises = files.map(async (file) => {
-              if (file.name.endsWith('/')) return null;
-
-              // Get metadata for token
+          // IMPORTANT: Do NOT trust cached URLs in Firestore (signed URLs can expire).
+          // Always regenerate fresh URLs from Storage.
+          const buildFreshFilesFromPaths = async (paths) => {
+            const filePromises = paths.map(async (path) => {
+              const file = bucket.file(path);
               const [metadata] = await file.getMetadata().catch(() => [{}]);
               let token = metadata.metadata?.firebaseStorageDownloadTokens;
               let url;
 
               if (token) {
-                url = `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(file.name)}?alt=media&token=${token}`;
+                url = `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(path)}?alt=media&token=${token}`;
               } else {
-                // Fallback if no token
                 const [signedUrl] = await file.getSignedUrl({
                   action: 'read',
                   expires: Date.now() + 1000 * 60 * 60, // 1 hour
@@ -513,19 +506,40 @@ exports.freepikDownloadTemplate = onRequest(
               }
 
               return {
-                name: file.name.split('/').pop(),
-                path: file.name,
-                url: url,
+                name: path.split('/').pop(),
+                path,
+                url,
               };
             });
+            return (await Promise.all(filePromises)).filter((f) => f !== null);
+          };
 
-            uploadedFiles = (await Promise.all(filePromises)).filter((f) => f !== null);
-            
-            // Optional: Backfill the files array to Firestore for next time
+          if (imgData.files && Array.isArray(imgData.files)) {
+            const paths = imgData.files
+              .map((f) => (f && typeof f.path === 'string' ? f.path : null))
+              .filter(Boolean);
+
+            if (paths.length > 0) {
+              uploadedFiles = await buildFreshFilesFromPaths(paths);
+            } else {
+              uploadedFiles = [];
+            }
+          }
+
+          if (!uploadedFiles || uploadedFiles.length === 0) {
+            // Fallback: List files from storage if 'files' array is missing or incomplete
+            const prefix = `images/common/${resourceId}/`;
+            const [files] = await bucket.getFiles({ prefix });
+            const paths = files
+              .map((f) => f.name)
+              .filter((name) => name && !name.endsWith('/'));
+            uploadedFiles = await buildFreshFilesFromPaths(paths);
+
+            // Optional: Backfill the files array to Firestore for next time (paths + fresh urls)
             try {
-                await existingDocRef.update({ files: uploadedFiles });
+              await existingDocRef.update({ files: uploadedFiles });
             } catch (e) {
-                console.warn('Failed to backfill files array', e);
+              console.warn('Failed to backfill files array', e);
             }
           }
 

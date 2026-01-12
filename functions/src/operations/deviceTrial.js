@@ -6,6 +6,7 @@ const axios = require('axios');
 const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
 const { defineSecret, defineString } = require('firebase-functions/params');
+const crypto = require('crypto');
 
 try {
   if (!admin.apps.length) {
@@ -40,6 +41,10 @@ function normalizePemPrivateKey(raw) {
   }
 
   return key;
+}
+
+function sha256Hex(input) {
+  return crypto.createHash('sha256').update(String(input)).digest('hex');
 }
 
 // Params (non-secret). These replace functions.config() (deprecated March 2026).
@@ -83,12 +88,14 @@ const verifyAppleDeviceTrial = onCall({
 
   const uid = context.auth.uid;
   const inputToken = request.data && request.data.inputToken;
+  const restoreId = request.data && request.data.restoreId;
 
   logger.info('verifyAppleDeviceTrial:start', {
     uid,
     traceId,
     hasInputToken: typeof inputToken === 'string' && inputToken.length > 0,
     inputTokenLen: typeof inputToken === 'string' ? inputToken.length : 0,
+    hasRestoreId: typeof restoreId === 'string' && restoreId.length > 0,
   });
 
   if (!inputToken || typeof inputToken !== 'string') {
@@ -245,10 +252,19 @@ const verifyAppleDeviceTrial = onCall({
   }
 
   // Step 3: Grant trial credits (idempotent per uid)
-  const incrementBy = 50;
-  let creditsGranted = 0;
+  // Grant into dedicated freeCredits fields (NOT remainingUsage/AI credits)
+  const grant = { generate: 5, download: 5 };
+  let creditsGrantedTotal = 0;
+  let freeCreditsGranted = { generate: 0, download: 0 };
+  let alreadyClaimedForUid = false;
   try {
     const userRef = db.collection('users').doc(uid);
+
+    const restoreKey =
+      typeof restoreId === 'string' && restoreId.length >= 12
+        ? crypto.createHash('sha256').update(String(restoreId)).digest('hex')
+        : null;
+    const restoreRef = restoreKey ? db.collection('deviceRestores').doc(restoreKey) : null;
 
     await db.runTransaction(async (tx) => {
       const snap = await tx.get(userRef);
@@ -257,12 +273,26 @@ const verifyAppleDeviceTrial = onCall({
       const alreadyClaimed = data.hasClaimedTrial === true;
 
       if (alreadyClaimed) {
-        creditsGranted = 0;
+        alreadyClaimedForUid = true;
+        creditsGrantedTotal = 0;
+        freeCreditsGranted = { generate: 0, download: 0 };
         tx.set(userRef, { lastUsedAt: FieldValue.serverTimestamp() }, { merge: true });
+
+        if (restoreRef) {
+          tx.set(
+            restoreRef,
+            {
+              lastUid: uid,
+              lastSeenAt: FieldValue.serverTimestamp(),
+            },
+            { merge: true },
+          );
+        }
         return;
       }
 
-      creditsGranted = incrementBy;
+      creditsGrantedTotal = grant.generate + grant.download;
+      freeCreditsGranted = grant;
 
       if (!exists) {
         tx.set(
@@ -271,9 +301,9 @@ const verifyAppleDeviceTrial = onCall({
             hasClaimedTrial: true,
             trialClaimedAt: FieldValue.serverTimestamp(),
             trialProvider: 'devicecheck',
-            remainingUsage: {
-              download: 0,
-              generate: incrementBy,
+            freeCredits: {
+              generate: grant.generate,
+              download: grant.download,
             },
             createdAt: FieldValue.serverTimestamp(),
             lastUsedAt: FieldValue.serverTimestamp(),
@@ -285,17 +315,31 @@ const verifyAppleDeviceTrial = onCall({
           hasClaimedTrial: true,
           trialClaimedAt: FieldValue.serverTimestamp(),
           trialProvider: 'devicecheck',
-          'remainingUsage.generate': FieldValue.increment(incrementBy),
+          'freeCredits.generate': FieldValue.increment(grant.generate),
+          'freeCredits.download': FieldValue.increment(grant.download),
           lastUsedAt: FieldValue.serverTimestamp(),
         });
+      }
+
+      if (restoreRef) {
+        tx.set(
+          restoreRef,
+          {
+            firstUid: uid,
+            lastUid: uid,
+            trialClaimedAt: FieldValue.serverTimestamp(),
+            lastSeenAt: FieldValue.serverTimestamp(),
+          },
+          { merge: true },
+        );
       }
     });
 
     logger.info('verifyAppleDeviceTrial:firestore_grant_ok', {
       uid,
       traceId,
-      creditsGranted,
-      incrementBy,
+      creditsGrantedTotal,
+      grant,
       durationMs: Date.now() - startedAt,
     });
   } catch (e) {
@@ -350,17 +394,182 @@ const verifyAppleDeviceTrial = onCall({
       message: e && e.message,
     });
     // Do not revoke credits; report but return success as credits may already be granted.
-    return { ok: true, creditsGranted, note: 'Trial processed; device state finalize failed.' };
+    return {
+      ok: true,
+      creditsGrantedTotal,
+      freeCreditsGranted,
+      alreadyClaimedForUid,
+      note: 'Trial processed; device state finalize failed.',
+    };
   }
 
   logger.info('verifyAppleDeviceTrial:success', {
     uid,
     traceId,
-    creditsGranted,
+    creditsGrantedTotal,
     durationMs: Date.now() - startedAt,
   });
 
-  return { ok: true, creditsGranted };
+  return { ok: true, creditsGrantedTotal, freeCreditsGranted, alreadyClaimedForUid };
 });
 
-module.exports = { verifyAppleDeviceTrial };
+/**
+ * resetAppleDeviceTrialDev
+ * Dev-only callable to reset Apple DeviceCheck bits for the current device.
+ * Only allowed when APPLE_DEVICECHECK_BASE_URL points to the development endpoint.
+ */
+const resetAppleDeviceTrialDev = onCall(
+  {
+    region: 'europe-west1',
+    secrets: [APPLE_PRIVATE_KEY],
+  },
+  async (request) => {
+    if (!request.auth?.uid) {
+      throw new HttpsError('unauthenticated', 'Authentication required.');
+    }
+
+    const uid = request.auth.uid;
+    const inputToken = request.data && request.data.inputToken;
+    const alsoResetFirestore = !!(request.data && request.data.alsoResetFirestore);
+    const startedAt = Date.now();
+
+    if (!inputToken || typeof inputToken !== 'string') {
+      throw new HttpsError('invalid-argument', 'Missing or invalid "inputToken".');
+    }
+
+    const rawBaseUrl = APPLE_DEVICECHECK_BASE_URL.value();
+    const baseUrl = String(rawBaseUrl).trim().replace(/\/+$/, '');
+    const isDevEndpoint = baseUrl === 'https://api.development.devicecheck.apple.com';
+    if (!isDevEndpoint) {
+      throw new HttpsError(
+        'failed-precondition',
+        'resetAppleDeviceTrialDev is only allowed against the Apple DEVELOPMENT DeviceCheck endpoint.',
+      );
+    }
+
+    // Load Apple credentials
+    const keyId = APPLE_KEY_ID.value();
+    const teamId = APPLE_TEAM_ID.value();
+    const rawPrivateKey = APPLE_PRIVATE_KEY.value();
+    if (!keyId || !teamId || !rawPrivateKey) {
+      throw new HttpsError('failed-precondition', 'Apple DeviceCheck configuration missing.');
+    }
+
+    const privateKey = normalizePemPrivateKey(rawPrivateKey);
+
+    // Create JWT for Apple DeviceCheck (ES256)
+    const iatSeconds = Math.floor(Date.now() / 1000);
+    const expSeconds = iatSeconds + (20 * 60);
+    let authToken;
+    try {
+      authToken = jwt.sign(
+        { iss: teamId, iat: iatSeconds, exp: expSeconds },
+        privateKey,
+        {
+          algorithm: 'ES256',
+          header: { alg: 'ES256', kid: keyId },
+        },
+      );
+    } catch (e) {
+      logger.error('resetAppleDeviceTrialDev:jwt_sign_error', {
+        uid,
+        message: e && e.message,
+      });
+      throw new HttpsError('internal', 'Failed to generate Apple auth token.');
+    }
+
+    const headers = {
+      Authorization: `Bearer ${authToken}`,
+      'Content-Type': 'application/json',
+    };
+
+    const queryUrl = `${baseUrl}/v1/query_two_bits`;
+    const updateUrl = `${baseUrl}/v1/update_two_bits`;
+    const tokenHashPrefix = sha256Hex(inputToken).slice(0, 10);
+
+    let before = { bit0: undefined, bit1: undefined };
+    try {
+      const queryResp = await axios.post(
+        queryUrl,
+        {
+          device_token: inputToken,
+          transaction_id: uuidv4(),
+          timestamp: Date.now(),
+        },
+        { headers },
+      );
+      const data = queryResp?.data ?? {};
+      before.bit0 = typeof data.bit0 !== 'undefined' ? Number(data.bit0) || 0 : undefined;
+      before.bit1 = typeof data.bit1 !== 'undefined' ? Number(data.bit1) || 0 : undefined;
+    } catch (e) {
+      logger.warn('resetAppleDeviceTrialDev:query_before_failed', {
+        uid,
+        tokenHashPrefix,
+        status: e?.response?.status,
+      });
+    }
+
+    try {
+      await axios.post(
+        updateUrl,
+        {
+          device_token: inputToken,
+          transaction_id: uuidv4(),
+          timestamp: Date.now(),
+          bit0: false,
+          bit1: false,
+        },
+        { headers },
+      );
+    } catch (e) {
+      logger.error('resetAppleDeviceTrialDev:update_error', {
+        uid,
+        tokenHashPrefix,
+        status: e?.response?.status,
+        body: e?.response?.data,
+        message: e && e.message,
+      });
+      throw new HttpsError('internal', 'Failed to reset device trial bits.');
+    }
+
+    let firestoreReset = false;
+    if (alsoResetFirestore) {
+      try {
+        await db
+          .collection('users')
+          .doc(uid)
+          .set(
+            {
+              hasClaimedTrial: false,
+              trialClaimedAt: FieldValue.delete(),
+              trialProvider: FieldValue.delete(),
+              freeCredits: {
+                generate: 0,
+                download: 0,
+              },
+              lastUsedAt: FieldValue.serverTimestamp(),
+            },
+            { merge: true },
+          );
+        firestoreReset = true;
+      } catch (e) {
+        logger.warn('resetAppleDeviceTrialDev:firestore_reset_failed', {
+          uid,
+          message: e && e.message,
+        });
+      }
+    }
+
+    logger.info('resetAppleDeviceTrialDev:ok', {
+      uid,
+      tokenHashPrefix,
+      before,
+      firestoreReset,
+      durationMs: Date.now() - startedAt,
+    });
+
+    return { ok: true, before, firestoreReset };
+  },
+);
+
+module.exports = { verifyAppleDeviceTrial, resetAppleDeviceTrialDev };
