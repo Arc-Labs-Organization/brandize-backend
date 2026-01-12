@@ -1,4 +1,5 @@
 const { onCall, HttpsError } = require('firebase-functions/v2/https');
+const { defineSecret } = require('firebase-functions/params');
 const admin = require('firebase-admin');
 const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 const { verifyAuth } = require('../common/utils');
@@ -7,6 +8,8 @@ const axios = require('axios');
 
 const db = getFirestore();
 
+const REVENUECAT_SECRET_KEY = defineSecret('REVENUECAT_SECRET_KEY');
+
 /**
  * Manually sync subscription status from RevenueCat to Firestore
  * Callable Function
@@ -14,6 +17,7 @@ const db = getFirestore();
 const syncSubscription = onCall(
   {
     region: 'europe-west1',
+    secrets: [REVENUECAT_SECRET_KEY],
   },
   async (request) => {
     // 1. Auth Check - user must be logged in
@@ -26,7 +30,7 @@ const syncSubscription = onCall(
       // 2. Fetch from RevenueCat API
       const response = await axios.get(`https://api.revenuecat.com/v1/subscribers/${uid}`, {
         headers: {
-            'Authorization': `Bearer ${process.env.REVENUECAT_SECRET_KEY}`,
+            'Authorization': `Bearer ${REVENUECAT_SECRET_KEY.value()}`,
             'Content-Type': 'application/json',
             'X-Platform': 'firebase'
         }

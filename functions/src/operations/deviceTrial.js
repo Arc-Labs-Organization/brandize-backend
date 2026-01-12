@@ -48,8 +48,8 @@ function sha256Hex(input) {
 }
 
 // Params (non-secret). These replace functions.config() (deprecated March 2026).
-const APPLE_KEY_ID = defineString('APPLE_KEY_ID');
-const APPLE_TEAM_ID = defineString('APPLE_TEAM_ID');
+const APPLE_KEY_ID = defineSecret('APPLE_KEY_ID');
+const APPLE_TEAM_ID = defineSecret('APPLE_TEAM_ID');
 // For Xcode/dev-signed installs use: https://api.development.devicecheck.apple.com
 // For TestFlight/App Store use:      https://api.devicecheck.apple.com
 const APPLE_DEVICECHECK_BASE_URL = defineString('APPLE_DEVICECHECK_BASE_URL', {
@@ -72,7 +72,7 @@ const APPLE_PRIVATE_KEY = defineSecret('APPLE_PRIVATE_KEY');
  */
 const verifyAppleDeviceTrial = onCall({
   region: 'europe-west1',
-  secrets: [APPLE_PRIVATE_KEY],
+  secrets: [APPLE_PRIVATE_KEY, APPLE_KEY_ID, APPLE_TEAM_ID],
 }, async (request) => {
   const context = request;
   const startedAt = Date.now();
@@ -421,7 +421,7 @@ const verifyAppleDeviceTrial = onCall({
 const resetAppleDeviceTrialDev = onCall(
   {
     region: 'europe-west1',
-    secrets: [APPLE_PRIVATE_KEY],
+    secrets: [APPLE_PRIVATE_KEY, APPLE_KEY_ID, APPLE_TEAM_ID],
   },
   async (request) => {
     if (!request.auth?.uid) {

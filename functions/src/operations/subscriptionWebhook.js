@@ -1,9 +1,12 @@
 const { onRequest } = require('firebase-functions/v2/https');
+const { defineSecret } = require('firebase-functions/params');
 const admin = require('firebase-admin');
 const { getFirestore, FieldValue, Timestamp } = require('firebase-admin/firestore');
 const { SUBSCRIPTION_TIERS, ENTITLEMENT_TO_TIER } = require('../common/subscriptionConfig');
 
 const db = getFirestore();
+
+const REVENUECAT_WEBHOOK_AUTH = defineSecret('REVENUECAT_WEBHOOK_AUTH');
 
 /**
  * Handle RevenueCat Webhooks
@@ -12,15 +15,17 @@ const db = getFirestore();
 const revenueCatWebhook = onRequest(
   {
     region: 'europe-west1',
+    secrets: [REVENUECAT_WEBHOOK_AUTH],
     // No CORS needed for server-to-server webhooks
   },
   async (req, res) => {
     // 1. Security Check
     const authHeader = req.headers.authorization;
-    if (authHeader !== process.env.REVENUECAT_WEBHOOK_AUTH) {
+    if (authHeader !== REVENUECAT_WEBHOOK_AUTH.value()) {
       console.warn('Unauthorized webhook attempt');
       return res.status(401).send('Unauthorized');
     }
+
 
     const event = req.body && req.body.event;
     if (!event) {
