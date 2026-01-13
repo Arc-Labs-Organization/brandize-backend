@@ -50,13 +50,11 @@ function sha256Hex(input) {
 // Params (non-secret). These replace functions.config() (deprecated March 2026).
 const APPLE_KEY_ID = defineSecret('APPLE_KEY_ID');
 const APPLE_TEAM_ID = defineSecret('APPLE_TEAM_ID');
-// For Xcode/dev-signed installs use: https://api.development.devicecheck.apple.com
-// For TestFlight/App Store use:      https://api.devicecheck.apple.com
-const APPLE_DEVICECHECK_BASE_URL = defineString('APPLE_DEVICECHECK_BASE_URL', {
-  default: 'https://api.devicecheck.apple.com',
-});
+// Hardcoded to development endpoint for now.
+const APPLE_DEVICECHECK_BASE_URL = 'https://api.development.devicecheck.apple.com';
 
-//Use the base URL shown in the example curl commands—that is, https://api.development.devicecheck.apple.com—only for testing during development. When you’re ready to transition to a production environment, you must use the production base URL https://api.devicecheck.apple.com. 
+//Use the base URL shown in the example curl commands—that is, https://api.development.devicecheck.apple.com—only for testing during development. 
+// When you’re ready to transition to a production environment, you must use the production base URL https://api.devicecheck.apple.com. 
 
 // Secret (p8 content)
 const APPLE_PRIVATE_KEY = defineSecret('APPLE_PRIVATE_KEY');
@@ -149,7 +147,7 @@ const verifyAppleDeviceTrial = onCall({
   };
 
   // Apple DeviceCheck base URL
-  const rawBaseUrl = APPLE_DEVICECHECK_BASE_URL.value();
+  const rawBaseUrl = APPLE_DEVICECHECK_BASE_URL;
   const baseUrl = String(rawBaseUrl).trim().replace(/\/+$/, ''); // trim trailing slashes
   const queryUrl = `${baseUrl}/v1/query_two_bits`;
   const updateUrl = `${baseUrl}/v1/update_two_bits`;
@@ -437,7 +435,7 @@ const resetAppleDeviceTrialDev = onCall(
       throw new HttpsError('invalid-argument', 'Missing or invalid "inputToken".');
     }
 
-    const rawBaseUrl = APPLE_DEVICECHECK_BASE_URL.value();
+    const rawBaseUrl = APPLE_DEVICECHECK_BASE_URL;
     const baseUrl = String(rawBaseUrl).trim().replace(/\/+$/, '');
     const isDevEndpoint = baseUrl === 'https://api.development.devicecheck.apple.com';
     if (!isDevEndpoint) {
