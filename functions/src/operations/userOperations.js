@@ -43,11 +43,6 @@ async function ensureUserExists(uid) {
         generate: 0,
         download: 0,
       },
-      // Deprecated fields kept for strict safety if needed, but not primarily used anymore
-      remainingUsage: {
-        download: 0,
-        generate: 0,
-      },
       trialCreditsRemaining: 0,
       createdAt: FieldValue.serverTimestamp(),
       lastUsedAt: FieldValue.serverTimestamp(),
