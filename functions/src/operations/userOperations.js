@@ -40,8 +40,10 @@ async function ensureUserExists(uid) {
         generationsUsed: 0,
       },
       freeCredits: {
-        generate: 0,
-        download: 0,
+        downloadLimit: 0,
+        generateLimit: 0,
+        downloadsUsed: 0,
+        generationsUsed: 0,
       },
       trialCreditsRemaining: 0,
       createdAt: FieldValue.serverTimestamp(),
@@ -81,6 +83,23 @@ async function decrementUsage(uid, usageType) {
       downloadLimit: 0, generateLimit: 0, downloadsUsed: 0, generationsUsed: 0 
     };
 
+    const freeCredits = userData.freeCredits || {};
+
+    // Helper to get free remaining (handles legacy structure)
+    const getFreeRemaining = (type) => {
+       if (freeCredits[`${type}Limit`] !== undefined) {
+          const limit = Number(freeCredits[`${type}Limit`]) || 0;
+          const used = Number(freeCredits[`${type}sUsed`]) || 0;
+          return Math.max(0, limit - used);
+       }
+       // Legacy
+       let val = Number(freeCredits[type]);
+       if (type === 'generate' && isNaN(val)) {
+          val = Number(userData.trialCreditsRemaining) || 0;
+       }
+       return Number.isFinite(val) ? val : 0;
+    };
+
     const isSubActive = subscription.isActive === true;
     const limitKey = `${usageType}Limit`;
     const usedKey = `${usageType}sUsed`; // downloadsUsed or generationsUsed
@@ -96,21 +115,11 @@ async function decrementUsage(uid, usageType) {
         lastUsedAt: FieldValue.serverTimestamp(),
       });
       // Return total remaining (monthly + free)
-      const freeRemaining = (userData.freeCredits && userData.freeCredits[usageType]) || 0;
-      return (monthlyRemaining - 1) + freeRemaining; 
+      return (monthlyRemaining - 1) + getFreeRemaining(usageType); 
     }
 
     // 2. Fallback to Free Credits
-    const freeCredits = userData.freeCredits || {};
-    // Handle legacy formats if present, but prioritize map
-    const freeRemaining = Number(freeCredits[usageType]) || 0;
-
-    // Handle legacy trialCreditsRemaining for 'generate' if not in freeCredits
-    const legacyTrial = (usageType === 'generate' && !freeCredits.generate) 
-      ? (Number(userData.trialCreditsRemaining) || 0) 
-      : 0;
-    
-    const actualFreeRemaining = Math.max(freeRemaining, legacyTrial);
+    const actualFreeRemaining = getFreeRemaining(usageType);
 
     if (actualFreeRemaining > 0) {
        // Consume free credit
@@ -118,11 +127,39 @@ async function decrementUsage(uid, usageType) {
          lastUsedAt: FieldValue.serverTimestamp(),
        };
        
-       if (freeRemaining > 0) {
-         update[`freeCredits.${usageType}`] = actualFreeRemaining - 1;
-       } else if (legacyTrial > 0) {
-         update.trialCreditsRemaining = actualFreeRemaining - 1;
-         // Also verify if we should migrate this to freeCredits structure
+       if (freeCredits[`${usageType}Limit`] !== undefined) {
+         update[`freeCredits.${usageType}sUsed`] = FieldValue.increment(1);
+       } else {
+         // Migrate legacy to new structure on write
+         // Assume legacy limit was 5 (since we just changed default to 3, but legacy users likely had 5)
+         const LEGACY_LIMIT = 5;
+
+         const oldGen = Number(freeCredits.generate);
+         const genRemaining = Number.isFinite(oldGen) ? oldGen : (Number(userData.trialCreditsRemaining) || 0);
+         const dlRemaining = Number(freeCredits.download) || 0;
+         
+         // Calculate limit and used based on remaining
+         const genLimit = Math.max(LEGACY_LIMIT, genRemaining);
+         const genUsed = genLimit - genRemaining;
+
+         const dlLimit = Math.max(LEGACY_LIMIT, dlRemaining);
+         const dlUsed = dlLimit - dlRemaining;
+
+         const newCredits = {
+           generateLimit: genLimit,
+           generationsUsed: genUsed,
+           downloadLimit: dlLimit,
+           downloadsUsed: dlUsed,
+         };
+         
+         // Mark current as used (increment used count)
+         newCredits[`${usageType}sUsed`] = newCredits[`${usageType}sUsed`] + 1;
+
+         update.freeCredits = newCredits;
+         // Clean legacy
+         if (userData.trialCreditsRemaining) {
+           update.trialCreditsRemaining = 0;
+         }
        }
        
        transaction.update(userRef, update);
@@ -193,13 +230,42 @@ const userInfo = onRequest(
         const monthlyGenerationsRemaining = Math.max(0, (monthlyAllowance.generateLimit || 0) - (monthlyAllowance.generationsUsed || 0));
 
         // Calculate Free Remaining
-        // Legacy fallback
-        const freeGenerate = Number.isFinite(freeCredits.generate)
-          ? Math.max(0, freeCredits.generate)
-          : Math.max(0, Number(data.trialCreditsRemaining) || 0);
-        const freeDownload = Number.isFinite(freeCredits.download)
-          ? Math.max(0, freeCredits.download)
-          : 0;
+        let freeGenerate = 0;
+        let freeDownload = 0;
+        let freeCreditsResponse = {};
+
+        // Check new structure
+        if (freeCredits.generateLimit !== undefined || freeCredits.downloadLimit !== undefined) {
+          freeGenerate = Math.max(0, (freeCredits.generateLimit || 0) - (freeCredits.generationsUsed || 0));
+          freeDownload = Math.max(0, (freeCredits.downloadLimit || 0) - (freeCredits.downloadsUsed || 0));
+
+          freeCreditsResponse = {
+            downloadLimit: freeCredits.downloadLimit || 0,
+            generateLimit: freeCredits.generateLimit || 0,
+            downloadsUsed: freeCredits.downloadsUsed || 0,
+            generationsUsed: freeCredits.generationsUsed || 0,
+            remainingGenerate: freeGenerate,
+            remainingDownload: freeDownload,
+          };
+        } else {
+          // Legacy fallback
+          freeGenerate = Number.isFinite(freeCredits.generate)
+            ? Math.max(0, freeCredits.generate)
+            : Math.max(0, Number(data.trialCreditsRemaining) || 0);
+          freeDownload = Number.isFinite(freeCredits.download)
+            ? Math.max(0, freeCredits.download)
+            : 0;
+
+          // Expose as new structure to frontend
+          freeCreditsResponse = {
+            downloadLimit: freeDownload,
+            generateLimit: freeGenerate,
+            downloadsUsed: 0,
+            generationsUsed: 0,
+            remainingGenerate: freeGenerate,
+            remainingDownload: freeDownload,
+          };
+        }
 
         // Total
         // Only count monthly remaining if subscription is active
@@ -216,10 +282,7 @@ const userInfo = onRequest(
             remainingDownload: monthlyDownloadsRemaining,
             remainingGenerate: monthlyGenerationsRemaining
           },
-          freeCredits: {
-            generate: freeGenerate,
-            download: freeDownload,
-          },
+          freeCredits: freeCreditsResponse,
           subscriptionStatus: subscription.status || 'free',
           // Back-compat
           subStatus: subscription.status || 'free',

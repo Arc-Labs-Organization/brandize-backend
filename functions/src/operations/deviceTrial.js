@@ -251,7 +251,7 @@ const verifyAppleDeviceTrial = onCall({
 
   // Step 3: Grant trial credits (idempotent per uid)
   // Grant into dedicated freeCredits fields (NOT remainingUsage/AI credits)
-  const grant = { generate: 5, download: 5 };
+  const grant = { generate: 3, download: 3 };
   let creditsGrantedTotal = 0;
   let freeCreditsGranted = { generate: 0, download: 0 };
   let alreadyClaimedForUid = false;
@@ -300,8 +300,10 @@ const verifyAppleDeviceTrial = onCall({
             trialClaimedAt: FieldValue.serverTimestamp(),
             trialProvider: 'devicecheck',
             freeCredits: {
-              generate: grant.generate,
-              download: grant.download,
+              generateLimit: grant.generate,
+              downloadLimit: grant.download,
+              downloadsUsed: 0,
+              generationsUsed: 0,
             },
             createdAt: FieldValue.serverTimestamp(),
             lastUsedAt: FieldValue.serverTimestamp(),
@@ -309,14 +311,40 @@ const verifyAppleDeviceTrial = onCall({
           { merge: true },
         );
       } else {
-        tx.update(userRef, {
-          hasClaimedTrial: true,
-          trialClaimedAt: FieldValue.serverTimestamp(),
-          trialProvider: 'devicecheck',
-          'freeCredits.generate': FieldValue.increment(grant.generate),
-          'freeCredits.download': FieldValue.increment(grant.download),
-          lastUsedAt: FieldValue.serverTimestamp(),
-        });
+        const freeCredits = data.freeCredits || {};
+        const isLegacy =
+          freeCredits.generateLimit === undefined && freeCredits.downloadLimit === undefined;
+
+        if (isLegacy) {
+          const oldGen = Number(freeCredits.generate);
+          const genBase = Number.isFinite(oldGen)
+            ? oldGen
+            : Number(data.trialCreditsRemaining) || 0;
+          const dlBase = Number(freeCredits.download) || 0;
+
+          tx.update(userRef, {
+            hasClaimedTrial: true,
+            trialClaimedAt: FieldValue.serverTimestamp(),
+            trialProvider: 'devicecheck',
+            freeCredits: {
+              generateLimit: genBase + grant.generate,
+              generationsUsed: 0,
+              downloadLimit: dlBase + grant.download,
+              downloadsUsed: 0,
+            },
+            trialCreditsRemaining: 0,
+            lastUsedAt: FieldValue.serverTimestamp(),
+          });
+        } else {
+          tx.update(userRef, {
+            hasClaimedTrial: true,
+            trialClaimedAt: FieldValue.serverTimestamp(),
+            trialProvider: 'devicecheck',
+            'freeCredits.generateLimit': FieldValue.increment(grant.generate),
+            'freeCredits.downloadLimit': FieldValue.increment(grant.download),
+            lastUsedAt: FieldValue.serverTimestamp(),
+          });
+        }
       }
 
       if (restoreRef) {

@@ -94,11 +94,32 @@ const restoreTrialCredits = onCall(
 
       const fromData = fromSnap.data() || {};
       const fromFree = fromData.freeCredits || {};
-      const hasFromFreeGenerate = Object.prototype.hasOwnProperty.call(fromFree, 'generate');
-      const fromFreeGenerate = hasFromFreeGenerate
-        ? (Number(fromFree.generate) || 0)
-        : (Number(fromData.trialCreditsRemaining) || 0);
-      const fromFreeDownload = Number(fromFree.download) || 0;
+
+      let fromFreeGenerate = 0;
+      let fromFreeDownload = 0;
+
+      if (
+        fromFree.generateLimit !== undefined ||
+        fromFree.downloadLimit !== undefined
+      ) {
+        fromFreeGenerate = Math.max(
+          0,
+          (fromFree.generateLimit || 0) - (fromFree.generationsUsed || 0),
+        );
+        fromFreeDownload = Math.max(
+          0,
+          (fromFree.downloadLimit || 0) - (fromFree.downloadsUsed || 0),
+        );
+      } else {
+        const hasFromFreeGenerate = Object.prototype.hasOwnProperty.call(
+          fromFree,
+          'generate',
+        );
+        fromFreeGenerate = hasFromFreeGenerate
+          ? Number(fromFree.generate) || 0
+          : Number(fromData.trialCreditsRemaining) || 0;
+        fromFreeDownload = Number(fromFree.download) || 0;
+      }
 
       if (fromFreeGenerate <= 0 && fromFreeDownload <= 0) {
         tx.set(
@@ -109,14 +130,32 @@ const restoreTrialCredits = onCall(
         return { restored: 0, reason: 'no_free_remaining', fromUid };
       }
 
-      const toData = toSnap.exists ? (toSnap.data() || {}) : {};
+      const toData = toSnap.exists ? toSnap.data() || {} : {};
 
       const toFree = toData.freeCredits || {};
-      const toFreeGenerate = Number(toFree.generate) || 0;
-      const toFreeDownload = Number(toFree.download) || 0;
 
-      const newToFreeGenerate = toFreeGenerate + Math.max(0, fromFreeGenerate);
-      const newToFreeDownload = toFreeDownload + Math.max(0, fromFreeDownload);
+      let newToFreeGenerate = 0;
+      let newToFreeDownload = 0;
+      let toUsedGen = 0;
+      let toUsedDl = 0;
+
+      if (
+        toFree.generateLimit !== undefined ||
+        toFree.downloadLimit !== undefined
+      ) {
+        newToFreeGenerate =
+          (toFree.generateLimit || 0) + Math.max(0, fromFreeGenerate);
+        newToFreeDownload =
+          (toFree.downloadLimit || 0) + Math.max(0, fromFreeDownload);
+        toUsedGen = toFree.generationsUsed || 0;
+        toUsedDl = toFree.downloadsUsed || 0;
+      } else {
+        const oldToGen = Number(toFree.generate) || 0;
+        const oldToDl = Number(toFree.download) || 0;
+
+        newToFreeGenerate = oldToGen + Math.max(0, fromFreeGenerate);
+        newToFreeDownload = oldToDl + Math.max(0, fromFreeDownload);
+      }
 
       // Remove from old uid
       tx.set(
@@ -125,9 +164,12 @@ const restoreTrialCredits = onCall(
           // Clear legacy trial field to avoid double-counting
           trialCreditsRemaining: 0,
           freeCredits: {
-            ...(fromData.freeCredits || {}),
-            generate: 0,
-            download: 0,
+            generateLimit: 0,
+            downloadLimit: 0,
+            generationsUsed: 0,
+            downloadsUsed: 0,
+            generate: FieldValue.delete(),
+            download: FieldValue.delete(),
           },
           lastUsedAt: FieldValue.serverTimestamp(),
         },
@@ -142,9 +184,12 @@ const restoreTrialCredits = onCall(
           trialProvider: 'restore',
           trialRestoredAt: FieldValue.serverTimestamp(),
           freeCredits: {
-            ...(toData.freeCredits || {}),
-            generate: newToFreeGenerate,
-            download: newToFreeDownload,
+            generateLimit: newToFreeGenerate,
+            downloadLimit: newToFreeDownload,
+            generationsUsed: toUsedGen,
+            downloadsUsed: toUsedDl,
+            generate: FieldValue.delete(),
+            download: FieldValue.delete(),
           },
           lastUsedAt: FieldValue.serverTimestamp(),
         },
