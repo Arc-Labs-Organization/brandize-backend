@@ -223,6 +223,10 @@ const userInfo = onRequest(
           subscriptionStatus: subscription.status || 'free',
           // Back-compat
           subStatus: subscription.status || 'free',
+          // Next reset for UI
+          currentPeriodEnd: subscription.currentPeriodEnd 
+            ? subscription.currentPeriodEnd.toDate().toISOString() 
+            : null,
         });
       } catch (error) {
         console.error('Error in userInfo:', error);
