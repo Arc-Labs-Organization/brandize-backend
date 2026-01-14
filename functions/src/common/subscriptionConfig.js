@@ -9,12 +9,12 @@ const SUBSCRIPTION_TIERS = {
     generateLimit: 10,
   },
   pro: {
-    downloadLimit: 20,
-    generateLimit: 20,
+    downloadLimit: 25,
+    generateLimit: 25,
   },
   max: {
-    downloadLimit: 40,
-    generateLimit: 40,
+    downloadLimit: 50,
+    generateLimit: 50,
   },
 };
 
