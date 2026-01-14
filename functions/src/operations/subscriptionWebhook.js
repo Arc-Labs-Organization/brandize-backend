@@ -76,21 +76,50 @@ const revenueCatWebhook = onRequest(
 
         if (type === 'TRANSFER') {
              const fromIds = transferred_from || [];
-             const toId = transferred_to || app_user_id;
+             // Ensure toId is a string, not an array
+             let toId = app_user_id; // defaulted correctly above
+             if (Array.isArray(transferred_to) && transferred_to.length > 0) {
+                 toId = transferred_to[0];
+             } else if (typeof transferred_to === 'string') {
+                 toId = transferred_to;
+             }
 
              console.log(`Processing TRANSFER from ${JSON.stringify(fromIds)} to ${toId}`);
 
              let totalDownloadsUsed = 0;
              let totalGenerationsUsed = 0;
+             
+             // Track the best subscription found on old users to apply to new user
+             let transferredTier = 'free';
+             let transferredPeriodEnd = null;
 
              if (fromIds.length > 0) {
                  for (const oldUid of fromIds) {
                      const oldUserRef = db.collection('users').doc(oldUid);
                      const oldSnap = await oldUserRef.get();
                      if (oldSnap.exists) {
-                         const d = oldSnap.data().monthlyAllowance || {};
+                         const oldData = oldSnap.data();
+                         const d = oldData.monthlyAllowance || {};
+                         const s = oldData.subscription || {};
+
+                         // Accumulate usage
                          totalDownloadsUsed += (d.downloadsUsed || 0);
                          totalGenerationsUsed += (d.generationsUsed || 0);
+
+                         // Check if this user had a valid subscription to transfer
+                         if (s.status && s.status !== 'free' && s.isActive) {
+                             // Simple overwrite strategy: If we find a paid tier, use it. 
+                             // Realistically only one source user should have an active sub in a merge scenario.
+                             if (transferredTier === 'free') { 
+                                 transferredTier = s.status;
+                                 transferredPeriodEnd = s.currentPeriodEnd;
+                             }
+                         }
+
+                         // Transfer Subcollections (Images, Brands)
+                         await moveUserSubcollection(oldUid, toId, 'downloads');
+                         await moveUserSubcollection(oldUid, toId, 'generated');
+                         await moveUserSubcollection(oldUid, toId, 'brands');
 
                          // Disable old user
                          await oldUserRef.set({
@@ -115,20 +144,35 @@ const revenueCatWebhook = onRequest(
                  }
              }
 
+             // Apply transferred subscription info if found
+             // Note: If the new user ALREADY has a tier from the event (tier !== 'free'), we prefer that. 
+             // But usually TRANSFER events don't have entitlement info in them.
+             const finalTier = (tier !== 'free') ? tier : transferredTier;
+
              // Ensure the target user has the correct subscription status
-             if (tier !== 'free') {
+             if (finalTier !== 'free') {
+                 const newTierConfig = SUBSCRIPTION_TIERS[finalTier] || SUBSCRIPTION_TIERS['free'];
+                 
+                 // Determine period end: From event (expiration_at_ms) OR from old user (transferredPeriodEnd)
+                 let finalPeriodEnd = null;
+                 if (expiration_at_ms) {
+                     finalPeriodEnd = Timestamp.fromMillis(expiration_at_ms);
+                 } else if (transferredPeriodEnd) {
+                     finalPeriodEnd = transferredPeriodEnd;
+                 }
+
                  await userRef.set({
                      subscription: {
-                         status: tier,
+                         status: finalTier,
                          isActive: true,
-                         currentPeriodEnd: expiration_at_ms ? Timestamp.fromMillis(expiration_at_ms) : null,
+                         currentPeriodEnd: finalPeriodEnd,
                          provider: 'revenuecat',
                          lastUpdated: FieldValue.serverTimestamp(),
                      },
                      monthlyAllowance: {
-                         downloadLimit: tierConfig.downloadLimit,
-                         generateLimit: tierConfig.generateLimit
-                         // Do NOT reset usage here
+                         downloadLimit: newTierConfig.downloadLimit,
+                         generateLimit: newTierConfig.generateLimit
+                         // Do NOT reset usage here, we only incrementally added transferred usage above
                      }
                  }, { merge: true });
              }
@@ -204,5 +248,53 @@ const revenueCatWebhook = onRequest(
     }
   }
 );
+
+/**
+ * Helper to move documents from one user's subcollection to another
+ * @param {string} sourceUid 
+ * @param {string} targetUid 
+ * @param {string} collectionName 
+ */
+async function moveUserSubcollection(sourceUid, targetUid, collectionName) {
+    try {
+        const sourceRef = db.collection('users').doc(sourceUid).collection(collectionName);
+        const targetRef = db.collection('users').doc(targetUid).collection(collectionName);
+
+        // Get documents in batches
+        const snapshot = await sourceRef.limit(400).get();
+        
+        if (snapshot.empty) return;
+
+        const batch = db.batch();
+        let count = 0;
+
+        for (const doc of snapshot.docs) {
+            const data = doc.data();
+            // Preserve ID
+            const newDocRef = targetRef.doc(doc.id);
+            
+            // Meta fields to track history, but keep core data
+            batch.set(newDocRef, { 
+                ...data, 
+                originalOwner: sourceUid, 
+                transferredAt: FieldValue.serverTimestamp() 
+            });
+            batch.delete(doc.ref);
+            count++;
+        }
+
+        await batch.commit();
+        console.log(`Transferred ${count} docs in ${collectionName} from ${sourceUid} to ${targetUid}`);
+
+        // If we hit the limit, recurse to get the rest
+        if (count >= 400) {
+            await moveUserSubcollection(sourceUid, targetUid, collectionName);
+        }
+
+    } catch (error) {
+        console.error(`Error transferring subcollection ${collectionName}:`, error);
+        // Don't throw, we want to continue partially if possible
+    }
+}
 
 module.exports = { revenueCatWebhook };
