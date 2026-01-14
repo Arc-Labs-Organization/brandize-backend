@@ -32,7 +32,14 @@ const revenueCatWebhook = onRequest(
       return res.status(400).send('No event body');
     }
 
-    const { type, app_user_id, product_id, entitlement_ids, expiration_at_ms } = event;
+    let { type, app_user_id, product_id, entitlement_ids, expiration_at_ms, transferred_from, transferred_to } = event;
+
+    // FIX: For TRANSFER events, app_user_id might be missing. We use the destination user as the primary ID.
+    if (type === 'TRANSFER') {
+        if (!app_user_id && transferred_to && transferred_to.length > 0) {
+            app_user_id = transferred_to[0];
+        }
+    }
 
     if (!app_user_id) {
         console.log('No app_user_id in event, skipping');
@@ -65,6 +72,68 @@ const revenueCatWebhook = onRequest(
         if (type === 'TEST') {
              // RevenueCat sends a TEST event on setup
              return res.status(200).send('Test received');
+        }
+
+        if (type === 'TRANSFER') {
+             const fromIds = transferred_from || [];
+             const toId = transferred_to || app_user_id;
+
+             console.log(`Processing TRANSFER from ${JSON.stringify(fromIds)} to ${toId}`);
+
+             let totalDownloadsUsed = 0;
+             let totalGenerationsUsed = 0;
+
+             if (fromIds.length > 0) {
+                 for (const oldUid of fromIds) {
+                     const oldUserRef = db.collection('users').doc(oldUid);
+                     const oldSnap = await oldUserRef.get();
+                     if (oldSnap.exists) {
+                         const d = oldSnap.data().monthlyAllowance || {};
+                         totalDownloadsUsed += (d.downloadsUsed || 0);
+                         totalGenerationsUsed += (d.generationsUsed || 0);
+
+                         // Disable old user
+                         await oldUserRef.set({
+                             subscription: {
+                                 status: 'free',
+                                 isActive: false,
+                                 transferredTo: toId,
+                                 lastUpdated: FieldValue.serverTimestamp()
+                             }
+                         }, { merge: true });
+                     }
+                 }
+
+                 if (totalDownloadsUsed > 0 || totalGenerationsUsed > 0) {
+                     console.log(`Transferring usage: DL=${totalDownloadsUsed}, GEN=${totalGenerationsUsed}`);
+                     await userRef.set({
+                         monthlyAllowance: {
+                             downloadsUsed: FieldValue.increment(totalDownloadsUsed),
+                             generationsUsed: FieldValue.increment(totalGenerationsUsed)
+                         }
+                     }, { merge: true });
+                 }
+             }
+
+             // Ensure the target user has the correct subscription status
+             if (tier !== 'free') {
+                 await userRef.set({
+                     subscription: {
+                         status: tier,
+                         isActive: true,
+                         currentPeriodEnd: expiration_at_ms ? Timestamp.fromMillis(expiration_at_ms) : null,
+                         provider: 'revenuecat',
+                         lastUpdated: FieldValue.serverTimestamp(),
+                     },
+                     monthlyAllowance: {
+                         downloadLimit: tierConfig.downloadLimit,
+                         generateLimit: tierConfig.generateLimit
+                         // Do NOT reset usage here
+                     }
+                 }, { merge: true });
+             }
+
+             return res.status(200).send('Transfer Processed');
         }
 
         // Handle Events

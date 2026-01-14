@@ -58,6 +58,18 @@ const syncSubscription = onCall(
           activeEntitlementInfo = entitlements.active['starter'];
       }
 
+      const originalAppUserId = subscriber.original_app_user_id;
+      
+      // Get stable identifier for the subscription chain (Original Purchase Date)
+      // This persists even if 'original_app_user_id' changes due to Transfer behavior.
+      let subscriptionFingerprint = null;
+      if (activeEntitlementInfo) {
+          const productId = activeEntitlementInfo.product_identifier;
+          if (productId && subscriber.subscriptions && subscriber.subscriptions[productId]) {
+              subscriptionFingerprint = subscriber.subscriptions[productId].original_purchase_date;
+          }
+      }
+
       // 4. Update Firestore
       const userRef = db.collection('users').doc(uid);
       const userDoc = await userRef.get();
@@ -74,39 +86,72 @@ const syncSubscription = onCall(
          newPeriodEndMs = new Date(activeEntitlementInfo.expires_date).getTime();
       }
 
+      // Check for carried over usage (Anti-Exploit)
+      // We look for other users with the same subscription fingerprint (Original Purchase Date).
+      let carriedOverDownloads = 0;
+      let carriedOverGenerations = 0;
+
+      if (subscriptionFingerprint && newPeriodEndMs > 0 && activeTier !== 'free') {
+          try {
+              const duplicatesSnapshot = await db.collection('users')
+                .where('subscription.fingerprint', '==', subscriptionFingerprint)
+                .get();
+              
+              if (!duplicatesSnapshot.empty) {
+                  duplicatesSnapshot.forEach(doc => {
+                     if (doc.id === uid) return; // Skip self
+                     
+                     const d = doc.data();
+                     const sub = d.subscription || {};
+                     const pEnd = sub.currentPeriodEnd ? sub.currentPeriodEnd.toDate().getTime() : 0;
+                     
+                     // If expiration matches closely (same billing period)
+                     // We use a 12h buffer to account for minor time sync differences/server processing time
+                     if (Math.abs(pEnd - newPeriodEndMs) < 1000 * 60 * 60 * 12) {
+                         const uDl = (d.monthlyAllowance && d.monthlyAllowance.downloadsUsed) || 0;
+                         const uGen = (d.monthlyAllowance && d.monthlyAllowance.generationsUsed) || 0;
+                         if (uDl > carriedOverDownloads) carriedOverDownloads = uDl;
+                         if (uGen > carriedOverGenerations) carriedOverGenerations = uGen;
+                     }
+                  });
+              }
+              if (carriedOverDownloads > 0 || carriedOverGenerations > 0) {
+                  console.log(`[Anti-Exploit] Found existing usage for Fingerprint ${subscriptionFingerprint}: DL=${carriedOverDownloads}, GEN=${carriedOverGenerations}`);
+              }
+          } catch (err) {
+              console.error('Error checking duplicate usage:', err);
+          }
+      }
+
       const tierConfig = SUBSCRIPTION_TIERS[activeTier];
       const updateData = {
           'subscription.lastSyncedAt': FieldValue.serverTimestamp(),
           'subscription.provider': 'revenuecat',
+          'subscription.revenueCatId': originalAppUserId || FieldValue.delete(),
+          'subscription.fingerprint': subscriptionFingerprint || FieldValue.delete(),
       };
 
       // Check if we need to reset usage logic
       // Reset if:
       // A) It is a new billing period (new expiration > old expiration)
-      // B) User upgraded tier (activeTier changed and is not free) - handled below? 
-      //    Actually tier change usually implies new period or immediate effect.
-      //    If immediate upgrade, RC usually extends or changes expiration.
-      //    Let's stick to: If period end moved forward significantly (> 24h?) or 
-      //    if status changed from free/expired to active.
+      // B) User upgraded tier (activeTier changed and is not free) 
       
       const isNewPeriod = newPeriodEndMs > (currentPeriodEnd + 1000 * 60 * 60); // 1 hour buffer
       const wasInactive = !currentSubscription.isActive || currentSubscription.status === 'free';
       
       if (activeTier !== 'free' && (isNewPeriod || wasInactive)) {
-          // RESET COUNTERS
+          // RESET COUNTERS (or Apply Carried Over)
           updateData['subscription.status'] = activeTier;
           updateData['subscription.isActive'] = true;
           updateData['subscription.currentPeriodEnd'] = admin.firestore.Timestamp.fromMillis(newPeriodEndMs);
           
           updateData['monthlyAllowance.downloadLimit'] = tierConfig.downloadLimit;
           updateData['monthlyAllowance.generateLimit'] = tierConfig.generateLimit;
-          // Only reset usage if it's actually a new period, otherwise we might give free credits heavily on upgrades?
-          // On upgrade, usually proration occurs or new period starts.
-          // It is safer to reset usage on Upgrade.
-          updateData['monthlyAllowance.downloadsUsed'] = 0;
-          updateData['monthlyAllowance.generationsUsed'] = 0;
           
-          console.log(`Sync for ${uid}: New Period/Upgrade detected. Resetting limits.`);
+          updateData['monthlyAllowance.downloadsUsed'] = carriedOverDownloads;
+          updateData['monthlyAllowance.generationsUsed'] = carriedOverGenerations;
+          
+          console.log(`Sync for ${uid}: New Period/Upgrade detected. Limits: ${tierConfig.downloadLimit}, Usage: ${carriedOverDownloads}/${carriedOverGenerations}`);
       } else if (activeTier !== 'free') {
           // Active, but same period. Just ensure limits match tier (in case of config change) but DO NOT reset usage.
           updateData['subscription.status'] = activeTier;
