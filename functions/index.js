@@ -73,6 +73,5 @@ exports.restoreTrialCredits = restoreTrialCredits;
 
 // Import and export Subscription Operations
 const { revenueCatWebhook } = require('./src/operations/subscriptionWebhook');
-const { syncSubscription } = require('./src/operations/syncSubscription');
 exports.revenueCatWebhook = revenueCatWebhook;
-exports.syncSubscription = syncSubscription;
+
