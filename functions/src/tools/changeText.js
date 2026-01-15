@@ -251,8 +251,6 @@ async function getChangeTextFlows() {
           });
       } catch (_) {}
 
-      // Decrement usage only after successful generation & persistence steps
-      await decrementUsage(uid, 'generate');
       return { mimeType, id, storagePath: imagePath, downloadUrl };
     }
   );

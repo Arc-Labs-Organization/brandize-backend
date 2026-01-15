@@ -332,8 +332,7 @@ async function getRebrandFlows() {
         console.warn('Firestore metadata write skipped:', metaErr?.message || metaErr);
       }
 
-      // Decrement usage only after successful generation & persistence steps
-      await decrementUsage(uid, 'generate');
+      // No decrement here; credits are consumed at blueprint extraction step
       return {
         mimeType,
         modelVersion: rawResponse?.modelVersion,
@@ -725,6 +724,12 @@ exports.generateSmartBlueprint = onRequest(
 
         const { generateSmartBlueprintFlow } = await getRebrandFlows();
         const llmResult = await generateSmartBlueprintFlow({ brand: brandData, imageBase64, updateFields: parsedUpdateFields });
+
+        // Decrement usage only after successful extraction (bill as a generation credit)
+        try {
+          await ensureUserExists(user_id);
+          await decrementUsage(user_id, 'generate');
+        } catch (_) {}
 
         return res.status(200).json(llmResult);
       } catch (err) {
