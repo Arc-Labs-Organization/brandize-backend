@@ -89,7 +89,6 @@ async function getChangeTextFlows() {
     },
     async ({ uid, blueprint, croppedImageBase64, croppedImageMimeType }) => {
       await ensureUserExists(uid);
-      await decrementUsage(uid, 'generate');
 
       const bp = blueprint || {};
       const textOps = bp.updated_texts || {};
@@ -252,6 +251,8 @@ async function getChangeTextFlows() {
           });
       } catch (_) {}
 
+      // Decrement usage only after successful generation & persistence steps
+      await decrementUsage(uid, 'generate');
       return { mimeType, id, storagePath: imagePath, downloadUrl };
     }
   );
@@ -351,16 +352,15 @@ exports.extractTexts = onRequest(
             }
           }
 
-          // Perform user accounting here (not as input to the flow)
-          try {
-            await ensureUserExists(uid);
-            await decrementUsage(uid, 'generate');
-          } catch (_) {}
-
           const out = await extractTexts({
             croppedImageBase64: imageBuffer.toString('base64'),
             croppedImageMimeType: imageMimeType,
           });
+          // Decrement usage only after successful extraction
+          try {
+            await ensureUserExists(uid);
+            await decrementUsage(uid, 'generate');
+          } catch (_) {}
           return res.status(200).json(out);
         }
 
@@ -370,14 +370,15 @@ exports.extractTexts = onRequest(
         if (!base64) {
           return res.status(400).json({ error: 'Missing required fields: croppedImageBase64' });
         }
-        try {
-          await ensureUserExists(uid);
-          await decrementUsage(uid, 'generate');
-        } catch (_) {}
         const out = await extractTexts({
           croppedImageBase64: base64,
           croppedImageMimeType: body.croppedImageMimeType,
         });
+        // Decrement usage only after successful extraction
+        try {
+          await ensureUserExists(uid);
+          await decrementUsage(uid, 'generate');
+        } catch (_) {}
         res.status(200).json(out);
       } catch (err) {
         console.error('extractTexts error:', err?.message || err);
