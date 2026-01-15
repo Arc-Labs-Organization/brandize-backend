@@ -59,7 +59,6 @@ async function getAddObjectFlows() {
 			aspectRatio,
 		}) => {
 			await ensureUserExists(uid);
-			await decrementUsage(uid, 'generate');
 
 			// Path A: deterministic composite when objectBox is provided
 			if (objectBox && typeof objectBox.left === 'number' && typeof objectBox.top === 'number' && typeof objectBox.width === 'number' && typeof objectBox.height === 'number') {
@@ -178,6 +177,8 @@ async function getAddObjectFlows() {
 					});
 				} catch (_) {}
 
+				// Decrement usage only after successful generation & persistence steps
+				await decrementUsage(uid, 'generate');
 				return {
 					mimeType: 'image/png',
 					id,
@@ -186,7 +187,6 @@ async function getAddObjectFlows() {
 					generated_img_url: downloadUrl,
 				};
 			}
-
 
 			// Path B: Gemini fallback with concise, high-signal prompt
 			const fullPrompt = buildAddObjectPrompt({ objectLocation, aspectRatio });
@@ -355,6 +355,8 @@ async function getAddObjectFlows() {
 				});
 			} catch (_) {}
 
+			// Decrement usage only after successful generation & persistence steps
+			await decrementUsage(uid, 'generate');
 			return {
 				mimeType,
 				id,

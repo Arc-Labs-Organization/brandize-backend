@@ -56,7 +56,6 @@ async function getReplaceImageFlows() {
 			aspectRatio,
 		}) => {
 			await ensureUserExists(uid);
-			await decrementUsage(uid, 'generate');
 
 			const fullPrompt = buildReplaceImagePrompt({ description, aspectRatio });
 
@@ -211,6 +210,8 @@ async function getReplaceImageFlows() {
 				});
 			} catch (_) {}
 
+			// Decrement usage only after successful generation & persistence steps
+			await decrementUsage(uid, 'generate');
 			return {
 				mimeType,
 				id,

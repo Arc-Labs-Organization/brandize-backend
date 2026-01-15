@@ -95,9 +95,8 @@ async function getRebrandFlows() {
       }),
     },
     async ({ uid, brand, blueprint, croppedImageBase64, croppedImageMimeType }) => {
-      // Ensure user exists and decrement generate usage
+      // Ensure user exists; decrement only after successful generation
       await ensureUserExists(uid);
-      await decrementUsage(uid, 'generate');
 
       const bp = blueprint || {};
       const additions = bp.additions || {};
@@ -333,6 +332,8 @@ async function getRebrandFlows() {
         console.warn('Firestore metadata write skipped:', metaErr?.message || metaErr);
       }
 
+      // Decrement usage only after successful generation & persistence steps
+      await decrementUsage(uid, 'generate');
       return {
         mimeType,
         modelVersion: rawResponse?.modelVersion,

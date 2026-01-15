@@ -81,7 +81,6 @@ async function getVirtualModelFlows() {
 			aspectRatio,
 		}) => {
 			await ensureUserExists(uid);
-			await decrementUsage(uid, 'generate');
 
 			const fullPrompt = buildVirtualModelPrompt({ mode, targetHand });
 
@@ -245,6 +244,8 @@ async function getVirtualModelFlows() {
 				});
 			} catch (_) {}
 
+			// Decrement usage only after successful generation & persistence steps
+			await decrementUsage(uid, 'generate');
 			return {
 				mimeType,
 				id,
