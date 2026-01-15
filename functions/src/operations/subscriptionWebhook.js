@@ -32,7 +32,7 @@ const revenueCatWebhook = onRequest(
       return res.status(400).send('No event body');
     }
 
-    let { type, app_user_id, product_id, entitlement_ids, expiration_at_ms, transferred_from, transferred_to } = event;
+    let { type, app_user_id, product_id, entitlement_ids, expiration_at_ms, transferred_from, transferred_to, store } = event;
 
     // FIX: For TRANSFER events, app_user_id might be missing. We use the destination user as the primary ID.
     if (type === 'TRANSFER') {
@@ -180,8 +180,30 @@ const revenueCatWebhook = onRequest(
              return res.status(200).send('Transfer Processed');
         }
 
+        // Fetch current user state to prevent race conditions (e.g. stale webhooks overwriting new upgrades)
+        // We want to ignore events that refer to an expiration timestamp OLDER than what we already have.
+        // This commonly happens during upgrades where PRODUCT_CHANGE (old sub end) and INITIAL_PURCHASE (new sub start) arrive concurrently.
+        const userSnap = await userRef.get();
+        const userData = userSnap.exists ? userSnap.data() : {};
+        const currentPeriodEnd = userData.subscription?.currentPeriodEnd?.toMillis() || 0;
+        const eventExpiration = expiration_at_ms || 0;
+
+        // PLAY_STORE FIX ONLY: If the event is about a subscription that expires BEFORE our current valid one, ignore it.
+        // This assumes that a later expiration date always supersedes an earlier one.
+        if (store === 'PLAY_STORE' && eventExpiration > 0 && currentPeriodEnd > 0 && eventExpiration < currentPeriodEnd) {
+             console.log(`Ignoring stale event (Exp: ${eventExpiration}) as user has newer subscription (Exp: ${currentPeriodEnd})`);
+             return res.status(200).send('Ignored Stale Event');
+        }
+
         // Handle Events
-        if (['INITIAL_PURCHASE', 'RENEWAL', 'PRODUCT_CHANGE'].includes(type) && tier !== 'free') {
+        // For Play Store, we ignore PRODUCT_CHANGE as it typically carries the OLD product info/expiration during an upgrade.
+        // We rely on 'INITIAL_PURCHASE' of the NEW product to set the new state.
+        const activationEvents = ['INITIAL_PURCHASE', 'RENEWAL'];
+        if (store !== 'PLAY_STORE') {
+             activationEvents.push('PRODUCT_CHANGE');
+        }
+
+        if (activationEvents.includes(type) && tier !== 'free') {
             console.log(`Activating subscription for ${app_user_id} at tier ${tier}`);
             
             // Reset monthly usage on renewal/purchase
