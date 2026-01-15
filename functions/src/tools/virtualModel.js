@@ -7,6 +7,7 @@ const { createMultipartParser, buildGeneratedImagePath, verifyAuth } = require('
 const { createAndUploadThumbnail, computeThumbPath } = require('../operations/thumbnailOperations');
 const { ensureUserExists, decrementUsage } = require('../operations/userOperations');
 const { initGenkit, GOOGLE_API_KEY } = require('../common/genkit');
+const { buildVirtualModelPrompt } = require('../common/prompts');
 
 try {
 	if (!admin.apps.length) {
@@ -82,27 +83,7 @@ async function getVirtualModelFlows() {
 			await ensureUserExists(uid);
 			await decrementUsage(uid, 'generate');
 
-			const parts = [];
-			parts.push('Task: Using the first image (the model), integrate the product from the second image either as held in hand or worn on the body based on the requested mode.');
-			parts.push('GENERAL RULES (follow precisely):');
-			parts.push('- Canvas lock: OUTPUT WIDTH and HEIGHT MUST MATCH the FIRST IMAGE exactly. No padding, borders, whitespace, or re-layout.');
-			parts.push('- Identity: Preserve the model’s identity, face, skin, hair, and pose. Do not alter facial features or body shape.');
-			parts.push('- Lighting & color: Match ambient lighting, color temperature, white balance, grain/noise, and shadows.');
-			parts.push('- Scale: Keep natural scale relative to the model and surrounding scene.');
-			parts.push('- Occlusion: Respect natural occlusions between fingers/clothing/body.');
-			parts.push('- Non-goals: Do NOT modify unrelated background elements or texts.');
-			if (mode === 'hold') {
-				parts.push('Mode: HOLD in HAND.');
-				if (targetHand) parts.push(`Target hand: ${targetHand}.`);
-				parts.push('Placement: Place the product naturally in the specified hand; align orientation to match grip.');
-				parts.push('Fingers: Ensure realistic finger wrapping/occlusion partly covering the product when appropriate.');
-				parts.push('Contact: Add subtle contact shadows and highlights between hand and product.');
-			} else if (mode === 'wear') {
-				parts.push('Mode: WEAR on BODY.');
-				parts.push('Fit: Align and conform the product to the body region, maintaining realistic drape/warp for cloth or fit for shoes/accessories.');
-				parts.push('Edges: Blend edges; follow contours and joints; no floating or clipping.');
-			}
-			const fullPrompt = parts.join('\n');
+			const fullPrompt = buildVirtualModelPrompt({ mode, targetHand });
 
 			const baseMime = modelImageMimeType || 'image/png';
 			const prodMime = productImageMimeType || 'image/png';

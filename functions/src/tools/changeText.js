@@ -7,6 +7,7 @@ const { createAndUploadThumbnail, computeThumbPath } = require('../operations/th
 const { createMultipartParser, buildGeneratedImagePath, verifyAuth } = require('../common/utils');
 const { ensureUserExists, decrementUsage } = require('../operations/userOperations');
 const { initGenkit, GOOGLE_API_KEY } = require('../common/genkit');
+const { getExtractTextsPrompt, buildChangeTextPrompt } = require('../common/prompts');
 
 try {
   if (!admin.apps.length) {
@@ -45,14 +46,7 @@ async function getChangeTextFlows() {
             contentType: mime,
           },
         },
-        {
-          text: [
-            'Task: Extract ALL visible texts exactly as shown in the image (preserve order).',
-            'Do NOT rewrite or suggest alternatives. Only extract what is visibly present.',
-            'Output ONLY the following JSON object:',
-            '{"original_texts": ["..."]}',
-          ].join('\n'),
-        },
+        { text: getExtractTextsPrompt() },
       ];
 
       const { text } = await ai.generate({
@@ -100,25 +94,7 @@ async function getChangeTextFlows() {
       const bp = blueprint || {};
       const textOps = bp.updated_texts || {};
       const aspectRatio = bp.aspectRatio || null;
-
-      const parts = [];
-      parts.push('Update the design by applying the following text changes. Remove any field where the new value is null. Preserve layout and composition.');
-      const keys = Object.keys(textOps);
-      if (keys.length) {
-        for (const key of keys) {
-          const val = textOps[key];
-          if (val === null || val === undefined) {
-            parts.push(`- Remove the text "${key}".`);
-          } else {
-            parts.push(`- Replace "${key}" with "${val}".`);
-          }
-        }
-      }
-      if (aspectRatio) {
-        parts.push(`Target aspect ratio: ${aspectRatio}.`);
-      }
-
-      const fullPrompt = parts.join('\n');
+      const fullPrompt = buildChangeTextPrompt({ textOps, aspectRatio });
 
       const mime = croppedImageMimeType || 'image/png';
       const promptArray = [

@@ -20,29 +20,7 @@ const db = getFirestore();
 let flows = null;
 
 const { createAndUploadThumbnail, computeThumbPath } = require('../operations/thumbnailOperations');
-
-// Prompt building (keep centralized + versioned)
-const REPLACE_IMAGE_PROMPT_VERSION = 'replace-image-v1';
-
-function buildReplaceImagePrompt({ description, aspectRatio }) {
-  // Keep this short and ranked (models follow earlier rules more reliably)
-  const parts = [];
-  parts.push('You are an expert image editor.');
-  parts.push('Task: In image #1 (the template crop), replace the described object/subject using image #2 (the replacement source).');
-  parts.push('Target region: the ENTIRE bounds of image #1. The output must match image #1 canvas exactly (no padding, borders, blank areas, or resizing the canvas).');
-  parts.push('Rules (follow strictly):');
-  parts.push('1) Preserve everything in image #1 except the target object/subject. Do NOT change layout, background graphics, logos, or any text.');
-  parts.push('2) Use ONLY the subject from image #2. Do not invent details that are not present in image #2.');
-  parts.push('3) Fit: COVER the target region with the replacement subject and center-crop as needed. Maintain natural proportions (no stretching). Prefer slight overfill over borders. Never CONTAIN.');
-  parts.push('4) Blend: Keep edges inside the region and softly blend/feather (1–2px). Match lighting direction, color temperature, white balance, and grain/noise. Add realistic shadows/reflections only if consistent with image #1.');
-  parts.push('5) No extras: no stickers/watermarks, no duplicated subjects, no extra objects, no heavy filters, no border artifacts.');
-
-  if (description) parts.push(`Replacement description: ${String(description).trim()}`);
-  // Note: aspectRatio is enforced via model config; keep this line only as a hint.
-  if (aspectRatio) parts.push(`Output aspect ratio hint (also enforced via config): ${String(aspectRatio).trim()}`);
-
-  return parts.join('\n');
-}
+const { REPLACE_IMAGE_PROMPT_VERSION, buildReplaceImagePrompt } = require('../common/prompts');
 
 async function getReplaceImageFlows() {
 	if (flows) return flows;

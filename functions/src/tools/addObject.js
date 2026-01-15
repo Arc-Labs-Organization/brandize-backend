@@ -7,6 +7,7 @@ const { createMultipartParser, buildGeneratedImagePath, verifyAuth } = require('
 const { createAndUploadThumbnail, computeThumbPath } = require('../operations/thumbnailOperations');
 const { ensureUserExists, decrementUsage } = require('../operations/userOperations');
 const { initGenkit, GOOGLE_API_KEY } = require('../common/genkit');
+const { buildAddObjectPrompt } = require('../common/prompts');
 
 try {
 	if (!admin.apps.length) {
@@ -186,14 +187,9 @@ async function getAddObjectFlows() {
 				};
 			}
 
+
 			// Path B: Gemini fallback with concise, high-signal prompt
-			const fullPrompt = [
-				'Output size: exactly match Image 1 (same width and height).',
-				'Add the object from Image 2 into Image 1.',
-				`Target location: ${objectLocation}.`,
-				'Edit only the target region; preserve everything else.',
-				'Match lighting, color balance, and shadows.',
-			].join('\n');
+			const fullPrompt = buildAddObjectPrompt({ objectLocation, aspectRatio });
 
 			const baseMime = croppedImageMimeType || 'image/png';
 			const objMime = objectImageMimeType || 'image/png';

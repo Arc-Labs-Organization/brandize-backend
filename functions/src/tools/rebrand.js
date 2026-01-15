@@ -7,6 +7,7 @@ const { createAndUploadThumbnail, computeThumbPath } = require('../operations/th
 const { createMultipartParser, buildGeneratedImagePath, verifyAuth } = require('../common/utils');
 const { ensureUserExists, decrementUsage } = require('../operations/userOperations');
 const { initGenkit, GOOGLE_API_KEY } = require('../common/genkit');
+const { buildRebrandPrompt, buildSmartBlueprintPrompt } = require('../common/prompts');
 
 try {
   if (!admin.apps.length) {
@@ -99,98 +100,28 @@ async function getRebrandFlows() {
       await decrementUsage(uid, 'generate');
 
       const bp = blueprint || {};
-      const textOps = bp.text_updates || {};
       const additions = bp.additions || {};
-      
-      const parts = [];
-      parts.push('Update the design per the following blueprint suggestions.');
 
-      // Brand Colors
-      if (bp.use_brand_colors && brand?.colorPalette && Array.isArray(brand.colorPalette) && brand.colorPalette.length > 0) {
-         parts.push(`Use the following brand colors: ${brand.colorPalette.join(', ')}.`);
-      }
-
-      // Text Updates
-      const keys = Object.keys(textOps);
-      if (keys.length) {
-        parts.push('Text updates:');
-        for (const key of keys) {
-          const val = textOps[key];
-          if (val === null || val === undefined) {
-            parts.push(`- Remove the text "${key}".`);
-          } else {
-            parts.push(`- Change "${key}" to "${val}".`);
-          }
-        }
-      }
-
-      // Additions & Logo Replacement
+      // Determine if logo media is needed
       let logoUrlToFetch = null;
-      
-      // Check if we need to use the brand logo
-      const needsLogo = bp.replace_logo || (additions && Object.keys(additions).some(k => {
-         const lower = k.toLowerCase();
-         return lower === 'brand_logo' || lower === 'logo';
-      }));
-      
+      const needsLogo =
+        bp.replace_logo ||
+        (additions &&
+         Object.keys(additions).some((k) => {
+          const lower = k.toLowerCase();
+          return lower === 'brand_logo' || lower === 'logo';
+         }));
       if (needsLogo && brand?.logoUrl) {
-         logoUrlToFetch = brand.logoUrl;
-      }
-
-      if (bp.replace_logo) {
-         parts.push('Replace the existing logo with the provided brand logo.');
-      }
-
-      // Handle additions (object: type -> location)
-      if (additions) {
-         for (const [type, location] of Object.entries(additions)) {
-            const lowerType = type.toLowerCase();
-            
-            if (lowerType === 'brand_logo' || lowerType === 'logo') {
-               parts.push(`Place the brand logo at ${location}.`);
-               continue;
-            }
-            
-            if (lowerType === 'brand_website' || lowerType === 'website') {
-               if (brand?.website) {
-                  parts.push(`Add the website "${brand.website}" at ${location}.`);
-               }
-               continue;
-            }
-            
-            if (lowerType === 'phone_number' || lowerType === 'phone') {
-               if (brand?.phone) {
-                  parts.push(`Add the phone number "${brand.phone}" at ${location}.`);
-               }
-               continue;
-            }
-
-            if (lowerType === 'brand_name' || lowerType === 'name') {
-               if (brand?.brandName) {
-                  parts.push(`Add the brand name "${brand.brandName}" at ${location}.`);
-               }
-               continue;
-            }
-
-            if (lowerType === 'brand_address' || lowerType === 'address') {
-               if (brand?.address) {
-                  parts.push(`Add the address "${brand.address}" at ${location}.`);
-               }
-               continue;
-            }
-         }
+        logoUrlToFetch = brand.logoUrl;
       }
 
       // Aspect Ratio
       let aspectRatio = null;
       if (bp.aspectRatio && allowedRatios.includes(bp.aspectRatio)) {
-         aspectRatio = bp.aspectRatio;
-         parts.push(`Target aspect ratio: ${bp.aspectRatio}.`);
+        aspectRatio = bp.aspectRatio;
       }
 
-      parts.push('GENERAL RULES: Preserve the overall layout, composition, and visual hierarchy of the original design. Do not remove or drastically move major visual elements unless explicitly requested.');
-
-      const fullPrompt = parts.join('\n');
+      const fullPrompt = buildRebrandPrompt({ brand, blueprint: bp });
 
       // Prepare Media
       const promptArray = [];
@@ -454,54 +385,7 @@ async function getRebrandFlows() {
       }
 
       const fieldValuesJson = JSON.stringify(fieldValues, null, 2);
-      const promptText = [
-        'We will update the texts in the provided image so they align with the branding of:',
-        '',
-        `- **Brand Name:** ${brand.brandName || 'N/A'}`,
-        `- **Description:** ${brand.description || 'N/A'}`,
-        '',
-        'Use the table below to determine which types of text should appear in the updated output:',
-        '',
-        '```json',
-        fieldValuesJson,
-        '```',
-        '',
-        '- **Fields that are `null`** must **not** appear in either **“updated_texts”** or **“additions.”**',
-        '    - If these fields exist in the original image, you should either **replace them with appropriate content** or **remove them entirely**.',
-        '    - If you choose to remove them, set their value to **`null`**.',
-        '- **Fields that have a valid value,** must appear **at least once** in either **“updated_texts”** or **“additions.”**',
-        '    - If you can replace original text with a context-appropriate and similarly sized version, do so in **“updated_texts.”**',
-        '    - If no suitable replacement exists, add the content to “additions” with a strict object per entry containing: **type**, and **location**.',
-        '      - **type** must be one of: `"phone" | "website" | "brand_name" | "brand_address".',
-        '      - **location** must be one of exactly: `"bottom-right"`, `"bottom-left"`, `"bottom-mid"`, `"top-left"`, `"top-mid"`, `"top-right"`. Do not use synonyms like "left-bottom" or "center-bottom".',
-        '',
-        '**Task:**',
-        '',
-        '1. Extract **all text that appears in the image** exactly as shown.',
-        '2. Rewrite and improve each extracted text so it matches the above brand’s brand voice, while trying to keep the character length similar to the original.',
-        '3. Identify whether the image contains **any logo that could be replaced** with the new brand logo.',
-        '4. Return the final result strictly in the following JSON structure:',
-        '',
-        '```json',
-        '{',
-        '  "original_texts": [',
-        '    "..."',
-        '  ],',
-        '  "updated_texts": [',
-        '    "..."',
-        '  ],',
-        '  "additions": [',
-        '    {',
-        '      "type": "...",',
-        '      "location": "..."',
-        '    }',
-        '  ],',
-        '  "replacable_logo": boolean',
-        '}',
-        '```',
-        '',
-        'Only include the JSON in your final answer.',
-      ].join('\n');
+      const promptText = buildSmartBlueprintPrompt({ brand, updateFields });
       
       console.log('[generateSmartBlueprint] Prompt table:', fieldValuesJson);
 
@@ -533,16 +417,12 @@ async function getRebrandFlows() {
       let json;
       try {
         let toParse = (text || '').trim();
-        // Strip leading fenced code markers like ```json or ```
         if (toParse.startsWith('```')) {
-          // Remove the opening fence and optional language marker
           toParse = toParse.replace(/^```(?:json)?\n?/, '');
         }
-        // Strip trailing closing fence
         if (toParse.endsWith('```')) {
           toParse = toParse.replace(/\n?```$/, '');
         }
-        // If the model added extra prose, try to extract only the JSON object
         const firstBrace = toParse.indexOf('{');
         const lastBrace = toParse.lastIndexOf('}');
         if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
