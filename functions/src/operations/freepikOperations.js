@@ -496,7 +496,7 @@ exports.freepikDownloadTemplate = onRequest(
   {
     region: 'europe-west1',
     timeoutSeconds: 300,
-    memory: '1GiB',
+    memory: '2GiB',
     cors: true,
     secrets: [FREEPIK_API_KEY, GOOGLE_API_KEY],
   },

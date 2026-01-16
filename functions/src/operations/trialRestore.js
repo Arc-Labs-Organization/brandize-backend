@@ -252,7 +252,7 @@ const restoreTrialCredits = onCall(
         fromUid,
       };
     });
-
+    
     logger.info('restoreTrialCredits:done', {
       uid,
       requestId,
@@ -262,6 +262,15 @@ const restoreTrialCredits = onCall(
     });
 
     return result;
+  } catch (e) {
+    logger.error('restoreTrialCredits:error', {
+      uid,
+      requestId,
+      message: e && e.message,
+      stack: e && e.stack,
+    });
+    throw new HttpsError('internal', 'Failed to restore trial credits.');
+  }
   },
 );
 
