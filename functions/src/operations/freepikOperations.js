@@ -9,6 +9,21 @@ const sharp = require('sharp');
 const { buildCommonImagePath, verifyAuth } = require('../common/utils');
 const { ensureUserExists, decrementUsage } = require('./userOperations');
 const { initGenkit, GOOGLE_API_KEY } = require('../common/genkit');
+const {
+  AppError,
+  ErrorCodes,
+  unauthenticated,
+  validationError,
+  providerUnavailable,
+  providerTimeout,
+  providerRejected,
+  rateLimited,
+  quotaExceeded,
+  storageError,
+  sendError,
+  normalizeUnknownError,
+  logError,
+} = require('../common/errors');
 
 try {
   if (!admin.apps.length) {
@@ -41,6 +56,7 @@ exports.freepikSearch = onRequest(
     secrets: [FREEPIK_API_KEY],
   },
   async (req, res) => {
+    const requestId = randomUUID();
     // Handle CORS preflight
     if (req.method === 'OPTIONS') {
       res.set('Access-Control-Allow-Origin', '*');
@@ -53,8 +69,9 @@ exports.freepikSearch = onRequest(
       // Authentication check
       const authHeader = req.headers.authorization;
       if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        console.error('Missing or invalid Authorization header');
-        return res.status(401).send('Unauthorized');
+        const err = unauthenticated('Unauthorized');
+        logError({ requestId, endpoint: 'freepikSearch', err });
+        return sendError(res, err, requestId);
       }
 
       const idToken = authHeader.split('Bearer ')[1];
@@ -62,21 +79,35 @@ exports.freepikSearch = onRequest(
         const decodedToken = await admin.auth().verifyIdToken(idToken);
         console.log('User authenticated:', decodedToken.uid);
       } catch (error) {
-        console.error('Error verifying ID token:', error);
-        return res.status(401).send('Unauthorized');
+        const err = unauthenticated('Unauthorized');
+        logError({ requestId, endpoint: 'freepikSearch', err });
+        return sendError(res, err, requestId);
       }
 
       if (req.method !== 'GET') {
-        return res.status(405).json({ error: 'Method not allowed. Use GET.' });
+        const err = new AppError({
+          code: ErrorCodes.INVALID_STATE,
+          message: 'Method not allowed. Use GET.',
+          httpStatus: 405,
+          retryable: false,
+        });
+        logError({ requestId, endpoint: 'freepikSearch', err });
+        return sendError(res, err, requestId);
       }
 
       const q = (req.query.q || '').toString().trim();
       let page = parseInt((req.query.page || '1').toString(), 10) || 1;
       let limit = parseInt((req.query.limit || '24').toString(), 10) || 24;
-      if (!q) return res.status(400).json({ error: 'Missing required query parameter: q' });
+      if (!q) {
+        const err = validationError({ q: 'required' });
+        logError({ requestId, endpoint: 'freepikSearch', err });
+        return sendError(res, err, requestId);
+      }
 
       if (!process.env.FREEPIK_API_KEY) {
-        return res.status(500).json({ error: 'FREEPIK_API_KEY not configured on server' });
+        const err = providerUnavailable('freepik', 'search');
+        logError({ requestId, endpoint: 'freepikSearch', err });
+        return sendError(res, err, requestId);
       }
 
       try {
@@ -137,8 +168,19 @@ exports.freepikSearch = onRequest(
         }
 
         if (!fpResp.ok) {
-          const msg = json?.message || json?.error || `Freepik API error (${fpResp.status})`;
-          return res.status(fpResp.status || 502).json({ error: msg, details: json });
+          if (fpResp.status === 429) {
+            const err = rateLimited(undefined, { provider: 'freepik', operation: 'search', status: fpResp.status });
+            logError({ requestId, endpoint: 'freepikSearch', err });
+            return sendError(res, err, requestId);
+          }
+          if (fpResp.status === 504) {
+            const err = providerTimeout('freepik', 'search');
+            logError({ requestId, endpoint: 'freepikSearch', err });
+            return sendError(res, err, requestId);
+          }
+          const err = providerRejected('freepik', 'search', fpResp.status, json?.message || json?.error || `Freepik API error (${fpResp.status})`, json);
+          logError({ requestId, endpoint: 'freepikSearch', err });
+          return sendError(res, err, requestId);
         }
 
         // Optionally normalize the response to only what's needed by the UI
@@ -165,13 +207,9 @@ exports.freepikSearch = onRequest(
         // Here we pass through the original payload so you can map on the client.
         return res.status(200).json(json);
       } catch (err) {
-        console.error('freepikSearch error:', err);
-        if (err instanceof Error) {
-          console.error(err.stack);
-        }
-        return res
-          .status(500)
-          .json({ error: 'Failed to fetch from Freepik', details: String(err?.message || err) });
+        const appErr = normalizeUnknownError(err);
+        logError({ requestId, endpoint: 'freepikSearch', err: appErr });
+        return sendError(res, appErr, requestId);
       }
     });
   },
@@ -200,6 +238,7 @@ exports.freepikDownload = onRequest(
     secrets: [FREEPIK_API_KEY],
   },
   async (req, res) => {
+    const requestId = randomUUID();
     // Handle CORS preflight
     if (req.method === 'OPTIONS') {
       res.set('Access-Control-Allow-Origin', '*');
@@ -210,22 +249,36 @@ exports.freepikDownload = onRequest(
 
     return cors(req, res, async () => {
       if (req.method !== 'GET') {
-        return res.status(405).json({ error: 'Method not allowed. Use GET.' });
+        const err = new AppError({
+          code: ErrorCodes.INVALID_STATE,
+          message: 'Method not allowed. Use GET.',
+          httpStatus: 405,
+          retryable: false,
+        });
+        logError({ requestId, endpoint: 'freepikDownload', err });
+        return sendError(res, err, requestId);
       }
 
       let uid;
       try {
         uid = await verifyAuth(req);
       } catch (e) {
-        return res.status(401).json({ error: e.message });
+        const err = unauthenticated(e?.message || 'Unauthorized');
+        logError({ requestId, endpoint: 'freepikDownload', err });
+        return sendError(res, err, requestId);
       }
 
       const resourceId = (req.query.resourceId || '').toString().trim();
-      if (!resourceId)
-        return res.status(400).json({ error: 'Missing required query parameter: resourceId' });
+      if (!resourceId) {
+        const err = validationError({ resourceId: 'required' });
+        logError({ requestId, endpoint: 'freepikDownload', err });
+        return sendError(res, err, requestId);
+      }
 
       if (!process.env.FREEPIK_API_KEY) {
-        return res.status(500).json({ error: 'FREEPIK_API_KEY not configured on server' });
+        const err = providerUnavailable('freepik', 'download');
+        logError({ requestId, endpoint: 'freepikDownload', err });
+        return sendError(res, err, requestId);
       }
 
       try {
@@ -234,9 +287,10 @@ exports.freepikDownload = onRequest(
         try {
           await decrementUsage(uid, 'download');
         } catch (error) {
-          if (error.message && (error.message.includes('No remaining') || error.message.includes('usage available'))) {
-            console.warn(`User ${uid} exceeded download quota.`);
-            return res.status(403).json({ error: 'Quota Exceeded', details: error.message });
+          if (error?.message && (error.message.includes('No remaining') || error.message.includes('usage available'))) {
+            const err = quotaExceeded({ usageType: 'download' });
+            logError({ requestId, uid, endpoint: 'freepikDownload', err });
+            return sendError(res, err, requestId);
           }
           throw error;
         }
@@ -281,9 +335,19 @@ exports.freepikDownload = onRequest(
           json = { raw: text };
         }
         if (!fpResp.ok) {
-          const msg =
-            (json && (json.message || json.error)) || `Freepik API error (${fpResp.status})`;
-          return res.status(fpResp.status || 502).json({ error: msg, details: json });
+          if (fpResp.status === 429) {
+            const err = rateLimited(undefined, { provider: 'freepik', operation: 'download', status: fpResp.status });
+            logError({ requestId, uid, endpoint: 'freepikDownload', err });
+            return sendError(res, err, requestId);
+          }
+          if (fpResp.status === 504) {
+            const err = providerTimeout('freepik', 'download');
+            logError({ requestId, uid, endpoint: 'freepikDownload', err });
+            return sendError(res, err, requestId);
+          }
+          const err = providerRejected('freepik', 'download', fpResp.status, (json && (json.message || json.error)) || `Freepik API error (${fpResp.status})`, json);
+          logError({ requestId, uid, endpoint: 'freepikDownload', err });
+          return sendError(res, err, requestId);
         }
         const downloadUrl = (json && (json.data?.url || json.url || json.location)) || null;
         if (!downloadUrl)
@@ -322,14 +386,26 @@ exports.freepikDownload = onRequest(
         } else {
           try {
             const assetResp = await fetch(downloadUrl);
-            if (!assetResp.ok)
-              return res.status(assetResp.status).json({ error: 'Failed to fetch Freepik asset' });
+            if (!assetResp.ok) {
+              const err = providerRejected('freepik', 'asset-download', assetResp.status, 'Failed to fetch Freepik asset');
+              logError({ requestId, uid, endpoint: 'freepikDownload', err });
+              return sendError(res, err, requestId);
+            }
             const zipBuffer = Buffer.from(await assetResp.arrayBuffer());
             const zip = await JSZip.loadAsync(zipBuffer);
             const imageFiles = Object.values(zip.files).filter(
               (f) => !f.dir && /\.(png|jpg|jpeg|webp)$/i.test(f.name),
             );
-            if (!imageFiles.length) return res.status(422).json({ error: 'NO_IMAGE_IN_ZIP' });
+            if (!imageFiles.length) {
+              const err = new AppError({
+                code: ErrorCodes.PIPELINE_STEP_FAILED,
+                message: 'NO_IMAGE_IN_ZIP',
+                httpStatus: 422,
+                retryable: false,
+              });
+              logError({ requestId, uid, endpoint: 'freepikDownload', err });
+              return sendError(res, err, requestId);
+            }
             const mainImage = imageFiles[0];
             const imgBuffer = await mainImage.async('nodebuffer');
             size = imgBuffer.length;
@@ -372,10 +448,9 @@ exports.freepikDownload = onRequest(
               thumbSize: 256,
             });
           } catch (e) {
-            console.error('Caching Freepik resource failed', e);
-            return res
-              .status(500)
-              .json({ error: 'CACHE_FAILED', details: e?.message || String(e) });
+            const err = storageError('CACHE_FAILED', true, { provider: 'freepik' });
+            logError({ requestId, uid, endpoint: 'freepikDownload', err });
+            return sendError(res, err, requestId);
           }
         }
 
@@ -405,13 +480,9 @@ exports.freepikDownload = onRequest(
           .status(200)
           .json({ imageId: resourceId, storagePath, downloadUrl: signedUrl, type: 'downloaded' });
       } catch (err) {
-        console.error('freepikDownload error:', err);
-        if (err instanceof Error) {
-          console.error(err.stack);
-        }
-        return res
-          .status(500)
-          .json({ error: 'Failed to download from Freepik', details: String(err?.message || err) });
+        const appErr = normalizeUnknownError(err);
+        logError({ requestId, endpoint: 'freepikDownload', err: appErr });
+        return sendError(res, appErr, requestId);
       }
     });
   },
@@ -430,6 +501,7 @@ exports.freepikDownloadTemplate = onRequest(
     secrets: [FREEPIK_API_KEY, GOOGLE_API_KEY],
   },
   async (req, res) => {
+    const requestId = randomUUID();
     if (req.method === 'OPTIONS') {
       res.set('Access-Control-Allow-Origin', '*');
       res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
@@ -439,22 +511,36 @@ exports.freepikDownloadTemplate = onRequest(
 
     return cors(req, res, async () => {
       if (req.method !== 'GET') {
-        return res.status(405).json({ error: 'Method not allowed. Use GET.' });
+        const err = new AppError({
+          code: ErrorCodes.INVALID_STATE,
+          message: 'Method not allowed. Use GET.',
+          httpStatus: 405,
+          retryable: false,
+        });
+        logError({ requestId, endpoint: 'freepikDownloadTemplate', err });
+        return sendError(res, err, requestId);
       }
 
       let uid;
       try {
         uid = await verifyAuth(req);
       } catch (e) {
-        return res.status(401).json({ error: e.message });
+        const err = unauthenticated(e?.message || 'Unauthorized');
+        logError({ requestId, endpoint: 'freepikDownloadTemplate', err });
+        return sendError(res, err, requestId);
       }
 
       const resourceId = (req.query.resourceId || '').toString().trim();
-      if (!resourceId)
-        return res.status(400).json({ error: 'Missing required query parameter: resourceId' });
+      if (!resourceId) {
+        const err = validationError({ resourceId: 'required' });
+        logError({ requestId, endpoint: 'freepikDownloadTemplate', err });
+        return sendError(res, err, requestId);
+      }
 
       if (!process.env.FREEPIK_API_KEY) {
-        return res.status(500).json({ error: 'FREEPIK_API_KEY not configured on server' });
+        const err = providerUnavailable('freepik', 'downloadTemplate');
+        logError({ requestId, endpoint: 'freepikDownloadTemplate', err });
+        return sendError(res, err, requestId);
       }
 
       try {
@@ -468,15 +554,16 @@ exports.freepikDownloadTemplate = onRequest(
 
         // Ensure user exists and decrement download usage
         await ensureUserExists(uid);
-      try {
-        await decrementUsage(uid, 'download');
-      } catch (error) {
-        if (error.message && (error.message.includes('No remaining') || error.message.includes('usage available'))) {
-          console.warn(`User ${uid} exceeded download quota.`);
-          return res.status(403).json({ error: 'Quota Exceeded', details: error.message });
+        try {
+          await decrementUsage(uid, 'download');
+        } catch (error) {
+          if (error?.message && (error.message.includes('No remaining') || error.message.includes('usage available'))) {
+            const err = quotaExceeded({ usageType: 'download' });
+            logError({ requestId, uid, endpoint: 'freepikDownloadTemplate', err });
+            return sendError(res, err, requestId);
+          }
+          throw error;
         }
-        throw error;
-      }
         // Check if template is already processed
         const existingDocRef = db.collection('images').doc(resourceId);
         const existingDoc = await existingDocRef.get();
@@ -587,7 +674,9 @@ exports.freepikDownloadTemplate = onRequest(
             });
         } catch (e) {
              if (e.name === 'AbortError') {
-                 return res.status(504).json({ error: 'Freepik API timeout' });
+               const err = providerTimeout('freepik', 'downloadTemplate');
+               logError({ requestId, uid, endpoint: 'freepikDownloadTemplate', err });
+               return sendError(res, err, requestId);
              }
              throw e;
         } finally {
@@ -596,7 +685,14 @@ exports.freepikDownloadTemplate = onRequest(
 
         if (!fpResp.ok) {
           const text = await fpResp.text();
-          return res.status(fpResp.status).json({ error: 'Freepik API error', details: text });
+          if (fpResp.status === 429) {
+            const err = rateLimited(undefined, { provider: 'freepik', operation: 'downloadTemplate', status: fpResp.status });
+            logError({ requestId, uid, endpoint: 'freepikDownloadTemplate', err });
+            return sendError(res, err, requestId);
+          }
+          const err = providerRejected('freepik', 'downloadTemplate', fpResp.status, 'Freepik API error', { details: text });
+          logError({ requestId, uid, endpoint: 'freepikDownloadTemplate', err });
+          return sendError(res, err, requestId);
         }
 
         const json = await fpResp.json();
@@ -608,8 +704,11 @@ exports.freepikDownloadTemplate = onRequest(
              downloadUrl = (json && (json.url || json.location)) || null;
         }
         
-        if (!downloadUrl)
-          return res.status(502).json({ error: 'Missing download URL from Freepik response' });
+        if (!downloadUrl) {
+          const err = providerRejected('freepik', 'downloadTemplate', 502, 'Missing download URL from Freepik response');
+          logError({ requestId, uid, endpoint: 'freepikDownloadTemplate', err });
+          return sendError(res, err, requestId);
+        }
         
         logTime('Get Download URL');
 
@@ -622,15 +721,20 @@ exports.freepikDownloadTemplate = onRequest(
             assetResp = await fetch(downloadUrl, { signal: dlController.signal });
         } catch (e) {
              if (e.name === 'AbortError') {
-                 return res.status(504).json({ error: 'Asset download timeout' });
+               const err = providerTimeout('freepik', 'asset-download');
+               logError({ requestId, uid, endpoint: 'freepikDownloadTemplate', err });
+               return sendError(res, err, requestId);
              }
              throw e;
         } finally {
             clearTimeout(dlTimeout);
         }
 
-        if (!assetResp.ok)
-          return res.status(assetResp.status).json({ error: 'Failed to fetch Freepik asset' });
+        if (!assetResp.ok) {
+          const err = providerRejected('freepik', 'asset-download', assetResp.status, 'Failed to fetch Freepik asset');
+          logError({ requestId, uid, endpoint: 'freepikDownloadTemplate', err });
+          return sendError(res, err, requestId);
+        }
         
         const assetBuffer = Buffer.from(await assetResp.arrayBuffer());
         logTime('Download Asset');
@@ -670,7 +774,9 @@ exports.freepikDownloadTemplate = onRequest(
         }
 
         if (!imgBuffer) {
-            return res.status(422).json({ error: 'No valid image found in download' });
+          const err = new AppError({ code: ErrorCodes.PIPELINE_STEP_FAILED, message: 'NO_VALID_IMAGE_FOUND', httpStatus: 422, retryable: false });
+          logError({ requestId, uid, endpoint: 'freepikDownloadTemplate', err });
+          return sendError(res, err, requestId);
         }
         logTime('Process Zip/Image');
 
@@ -742,12 +848,15 @@ exports.freepikDownloadTemplate = onRequest(
         try {
             layoutData = JSON.parse(jsonStr);
         } catch (e) {
-            console.error('Failed to parse Gemini response:', responseText);
-            return res.status(500).json({ error: 'Invalid response from AI model', details: responseText });
+          const err = new AppError({ code: ErrorCodes.PIPELINE_STEP_FAILED, message: 'INVALID_AI_RESPONSE', httpStatus: 500, retryable: false, details: { responseText } });
+          logError({ requestId, uid, endpoint: 'freepikDownloadTemplate', err });
+          return sendError(res, err, requestId);
         }
 
         if (!layoutData || !Array.isArray(layoutData.layouts)) {
-             return res.status(500).json({ error: 'Invalid layout data format from AI', details: layoutData });
+           const err = new AppError({ code: ErrorCodes.PIPELINE_STEP_FAILED, message: 'INVALID_LAYOUT_FORMAT', httpStatus: 500, retryable: false, details: layoutData });
+           logError({ requestId, uid, endpoint: 'freepikDownloadTemplate', err });
+           return sendError(res, err, requestId);
         }
         logTime('Gemini Analysis');
 
@@ -862,12 +971,9 @@ exports.freepikDownloadTemplate = onRequest(
         });
 
       } catch (err) {
-        console.error('freepikDownloadTemplate error:', err);
-        // Include stack trace in logs (automatically handled by console.error usually, but good to be explicit for simple objects)
-        if (err instanceof Error) {
-            console.error(err.stack);
-        }
-        return res.status(500).json({ error: 'Internal Server Error', details: err.message });
+        const appErr = normalizeUnknownError(err);
+        logError({ requestId, uid, endpoint: 'freepikDownloadTemplate', err: appErr });
+        return sendError(res, appErr, requestId);
       }
     });
   }
@@ -884,6 +990,7 @@ exports.getDownloadedThumbnails = onRequest(
     cors: true,
   },
   async (req, res) => {
+    const requestId = randomUUID();
     if (req.method === 'OPTIONS') {
       res.set('Access-Control-Allow-Origin', '*');
       res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
@@ -893,14 +1000,18 @@ exports.getDownloadedThumbnails = onRequest(
 
     return cors(req, res, async () => {
       if (req.method !== 'GET') {
-        return res.status(405).json({ error: 'Method not allowed. Use GET.' });
+        const err = new AppError({ code: ErrorCodes.INVALID_STATE, message: 'Method not allowed. Use GET.', httpStatus: 405, retryable: false });
+        logError({ requestId, endpoint: 'getDownloadedThumbnails', err });
+        return sendError(res, err, requestId);
       }
 
       let uid;
       try {
         uid = await verifyAuth(req);
       } catch (e) {
-        return res.status(401).json({ error: e.message });
+        const err = unauthenticated(e?.message || 'Unauthorized');
+        logError({ requestId, endpoint: 'getDownloadedThumbnails', err });
+        return sendError(res, err, requestId);
       }
 
       try {
@@ -923,11 +1034,9 @@ exports.getDownloadedThumbnails = onRequest(
 
         return res.status(200).json({ thumbnails });
       } catch (err) {
-        console.error('getDownloadedThumbnails error:', err);
-        if (err instanceof Error) {
-          console.error(err.stack);
-        }
-        return res.status(500).json({ error: 'Internal Server Error', details: err.message });
+        const appErr = normalizeUnknownError(err);
+        logError({ requestId, uid, endpoint: 'getDownloadedThumbnails', err: appErr });
+        return sendError(res, appErr, requestId);
       }
     });
   }
@@ -943,6 +1052,7 @@ exports.getDownloadedAssets = onRequest(
     cors: true,
   },
   async (req, res) => {
+    const requestId = randomUUID();
     if (req.method === 'OPTIONS') {
       res.set('Access-Control-Allow-Origin', '*');
       res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
@@ -952,19 +1062,25 @@ exports.getDownloadedAssets = onRequest(
 
     return cors(req, res, async () => {
       if (req.method !== 'GET') {
-        return res.status(405).json({ error: 'Method not allowed. Use GET.' });
+        const err = new AppError({ code: ErrorCodes.INVALID_STATE, message: 'Method not allowed. Use GET.', httpStatus: 405, retryable: false });
+        logError({ requestId, endpoint: 'getDownloadedAssets', err });
+        return sendError(res, err, requestId);
       }
 
       let uid;
       try {
         uid = await verifyAuth(req);
       } catch (e) {
-        return res.status(401).json({ error: e.message });
+        const err = unauthenticated(e?.message || 'Unauthorized');
+        logError({ requestId, endpoint: 'getDownloadedAssets', err });
+        return sendError(res, err, requestId);
       }
 
       const resourceId = (req.query.resourceId || '').toString().trim();
       if (!resourceId) {
-        return res.status(400).json({ error: 'Missing required query parameter: resourceId' });
+        const err = validationError({ resourceId: 'required' });
+        logError({ requestId, endpoint: 'getDownloadedAssets', err });
+        return sendError(res, err, requestId);
       }
 
       try {
@@ -977,7 +1093,9 @@ exports.getDownloadedAssets = onRequest(
           .get();
 
         if (!userDownloadDoc.exists) {
-          return res.status(404).json({ error: 'Download not found for this user' });
+          const err = new AppError({ code: ErrorCodes.VALIDATION_ERROR, message: 'Download not found for this user', httpStatus: 404, retryable: false });
+          logError({ requestId, uid, endpoint: 'getDownloadedAssets', err });
+          return sendError(res, err, requestId);
         }
 
         const userDownloadData = userDownloadDoc.data();
@@ -1067,11 +1185,9 @@ exports.getDownloadedAssets = onRequest(
         });
 
       } catch (err) {
-        console.error('getDownloadedAssets error:', err);
-        if (err instanceof Error) {
-          console.error(err.stack);
-        }
-        return res.status(500).json({ error: 'Internal Server Error', details: err.message });
+        const appErr = normalizeUnknownError(err);
+        logError({ requestId, uid, endpoint: 'getDownloadedAssets', err: appErr });
+        return sendError(res, appErr, requestId);
       }
     });
   }

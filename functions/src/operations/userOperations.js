@@ -4,6 +4,8 @@ const { onRequest } = require('firebase-functions/v2/https');
 const cors = require('cors')({ origin: true });
 const { verifyAuth } = require('../common/utils');
 const { SUBSCRIPTION_TIERS } = require('../common/subscriptionConfig');
+const { randomUUID } = require('crypto');
+const { AppError, ErrorCodes, unauthenticated, validationError, sendError, normalizeUnknownError, logError } = require('../common/errors');
 
 try {
   if (!admin.apps.length) {
@@ -191,6 +193,7 @@ const userInfo = onRequest(
     cors: true,
   },
   async (req, res) => {
+    const requestId = randomUUID();
     // Handle CORS preflight
     if (req.method === 'OPTIONS') {
       res.set('Access-Control-Allow-Origin', '*');
@@ -201,14 +204,23 @@ const userInfo = onRequest(
 
     return cors(req, res, async () => {
       if (req.method !== 'GET') {
-        return res.status(405).json({ error: 'Method not allowed. Use GET.' });
+        const err = new AppError({
+          code: ErrorCodes.INVALID_STATE,
+          message: 'Method not allowed. Use GET.',
+          httpStatus: 405,
+          retryable: false,
+        });
+        logError({ requestId, endpoint: 'userInfo', err });
+        return sendError(res, err, requestId);
       }
 
       let uid;
       try {
         uid = await verifyAuth(req);
       } catch (e) {
-        return res.status(401).json({ error: e.message });
+        const err = unauthenticated(e?.message || 'Unauthorized');
+        logError({ requestId, endpoint: 'userInfo', err });
+        return sendError(res, err, requestId);
       }
 
       try {
@@ -292,8 +304,9 @@ const userInfo = onRequest(
             : null,
         });
       } catch (error) {
-        console.error('Error in userInfo:', error);
-        return res.status(500).json({ error: 'Internal Server Error', details: error.message });
+        const appErr = normalizeUnknownError(error);
+        logError({ requestId, uid, endpoint: 'userInfo', err: appErr });
+        return sendError(res, appErr, requestId);
       }
     });
   },
@@ -310,6 +323,7 @@ const getDownloadedImages = onRequest(
     cors: true,
   },
   async (req, res) => {
+    const requestId = randomUUID();
     // Handle CORS preflight
     if (req.method === 'OPTIONS') {
       res.set('Access-Control-Allow-Origin', '*');
@@ -320,14 +334,23 @@ const getDownloadedImages = onRequest(
 
     return cors(req, res, async () => {
       if (req.method !== 'GET') {
-        return res.status(405).json({ error: 'Method not allowed. Use GET.' });
+        const err = new AppError({
+          code: ErrorCodes.INVALID_STATE,
+          message: 'Method not allowed. Use GET.',
+          httpStatus: 405,
+          retryable: false,
+        });
+        logError({ requestId, endpoint: 'getDownloadedImages', err });
+        return sendError(res, err, requestId);
       }
 
       let uid;
       try {
         uid = await verifyAuth(req);
       } catch (e) {
-        return res.status(401).json({ error: e.message });
+        const err = unauthenticated(e?.message || 'Unauthorized');
+        logError({ requestId, endpoint: 'getDownloadedImages', err });
+        return sendError(res, err, requestId);
       }
 
       try {
@@ -369,8 +392,9 @@ const getDownloadedImages = onRequest(
         const downloads = await Promise.all(downloadPromises);
         return res.status(200).json({ downloads });
       } catch (error) {
-        console.error('Error fetching downloads:', error);
-        return res.status(500).json({ error: 'Internal Server Error', details: error.message });
+        const appErr = normalizeUnknownError(error);
+        logError({ requestId, uid, endpoint: 'getDownloadedImages', err: appErr });
+        return sendError(res, appErr, requestId);
       }
     });
   },
@@ -387,6 +411,7 @@ const getCreatedImages = onRequest(
     cors: true,
   },
   async (req, res) => {
+    const requestId = randomUUID();
     // Handle CORS preflight
     if (req.method === 'OPTIONS') {
       res.set('Access-Control-Allow-Origin', '*');
@@ -397,14 +422,23 @@ const getCreatedImages = onRequest(
 
     return cors(req, res, async () => {
       if (req.method !== 'GET') {
-        return res.status(405).json({ error: 'Method not allowed. Use GET.' });
+        const err = new AppError({
+          code: ErrorCodes.INVALID_STATE,
+          message: 'Method not allowed. Use GET.',
+          httpStatus: 405,
+          retryable: false,
+        });
+        logError({ requestId, endpoint: 'getCreatedImages', err });
+        return sendError(res, err, requestId);
       }
 
       let uid;
       try {
         uid = await verifyAuth(req);
       } catch (e) {
-        return res.status(401).json({ error: e.message });
+        const err = unauthenticated(e?.message || 'Unauthorized');
+        logError({ requestId, endpoint: 'getCreatedImages', err });
+        return sendError(res, err, requestId);
       }
 
       try {
@@ -446,8 +480,9 @@ const getCreatedImages = onRequest(
         const created = await Promise.all(createdPromises);
         return res.status(200).json({ created });
       } catch (error) {
-        console.error('Error fetching created images:', error);
-        return res.status(500).json({ error: 'Internal Server Error', details: error.message });
+        const appErr = normalizeUnknownError(error);
+        logError({ requestId, uid, endpoint: 'getCreatedImages', err: appErr });
+        return sendError(res, appErr, requestId);
       }
     });
   },

@@ -8,6 +8,16 @@ const { createMultipartParser, buildGeneratedImagePath, verifyAuth } = require('
 const { ensureUserExists, decrementUsage } = require('../operations/userOperations');
 const { initGenkit, GOOGLE_API_KEY } = require('../common/genkit');
 const { getExtractTextsPrompt, buildChangeTextPrompt } = require('../common/prompts');
+const {
+  AppError,
+  ErrorCodes,
+  unauthenticated,
+  validationError,
+  storageError,
+  sendError,
+  normalizeUnknownError,
+  logError,
+} = require('../common/errors');
 
 try {
   if (!admin.apps.length) {
@@ -268,6 +278,7 @@ exports.extractTexts = onRequest(
     secrets: [GOOGLE_API_KEY],
   },
   async (req, res) => {
+    const requestId = randomUUID();
     if (req.method === 'OPTIONS') {
       res.set('Access-Control-Allow-Origin', '*');
       res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -276,13 +287,19 @@ exports.extractTexts = onRequest(
     }
 
     return cors(req, res, async () => {
-      if (req.method !== 'POST') return res.status(405).json({ error: 'Method Not Allowed' });
+      if (req.method !== 'POST') {
+        const err = new AppError({ code: ErrorCodes.INVALID_STATE, message: 'Method Not Allowed', httpStatus: 405, retryable: false });
+        logError({ requestId, endpoint: 'extractTexts', err });
+        return sendError(res, err, requestId);
+      }
       
       let uid;
       try {
         uid = await verifyAuth(req);
       } catch (e) {
-        return res.status(401).json({ error: e.message });
+        const err = unauthenticated(e?.message || 'Unauthorized');
+        logError({ requestId, endpoint: 'extractTexts', err });
+        return sendError(res, err, requestId);
       }
 
       try {
@@ -333,7 +350,9 @@ exports.extractTexts = onRequest(
                 const file = bucket.file(storagePath);
                 const [exists] = await file.exists();
                 if (!exists) {
-                  return res.status(404).json({ error: 'Image not found at storagePath' });
+                  const err = new AppError({ code: ErrorCodes.VALIDATION_ERROR, message: 'Image not found at storagePath', httpStatus: 404, retryable: false });
+                  logError({ requestId, uid, endpoint: 'extractTexts', err });
+                  return sendError(res, err, requestId);
                 }
 
                 const [metadata] = await file.getMetadata();
@@ -342,11 +361,14 @@ exports.extractTexts = onRequest(
                 const [downloadedBuffer] = await file.download();
                 imageBuffer = downloadedBuffer;
               } catch (e) {
-                console.error('Error downloading from storage:', e);
-                return res.status(500).json({ error: 'Failed to download image from storage' });
+                const err = storageError('Failed to download image from storage', true);
+                logError({ requestId, uid, endpoint: 'extractTexts', err });
+                return sendError(res, err, requestId);
               }
             } else {
-              return res.status(400).json({ error: 'Missing required fields: croppedImage or storagePath' });
+              const err = validationError({ croppedImage: 'required', storagePath: 'required' });
+              logError({ requestId, uid, endpoint: 'extractTexts', err });
+              return sendError(res, err, requestId);
             }
           }
 
@@ -366,7 +388,9 @@ exports.extractTexts = onRequest(
         const body = req.body || {};
         const base64 = body.croppedImageBase64 || body.croppedimage;
         if (!base64) {
-          return res.status(400).json({ error: 'Missing required fields: croppedImageBase64' });
+          const err = validationError({ croppedImageBase64: 'required' });
+          logError({ requestId, uid, endpoint: 'extractTexts', err });
+          return sendError(res, err, requestId);
         }
         const out = await extractTexts({
           croppedImageBase64: base64,
@@ -379,8 +403,9 @@ exports.extractTexts = onRequest(
         } catch (_) {}
         res.status(200).json(out);
       } catch (err) {
-        console.error('extractTexts error:', err?.message || err);
-        res.status(500).json({ error: 'Internal Server Error' });
+        const appErr = normalizeUnknownError(err);
+        logError({ requestId, uid, endpoint: 'extractTexts', err: appErr });
+        return sendError(res, appErr, requestId);
       }
     });
   }
@@ -395,6 +420,7 @@ exports.generateChangeText = onRequest(
     secrets: [GOOGLE_API_KEY],
   },
   async (req, res) => {
+    const requestId = randomUUID();
     if (req.method === 'OPTIONS') {
       res.set('Access-Control-Allow-Origin', '*');
       res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -403,13 +429,19 @@ exports.generateChangeText = onRequest(
     }
 
     return cors(req, res, async () => {
-      if (req.method !== 'POST') return res.status(405).json({ error: 'Method Not Allowed' });
+      if (req.method !== 'POST') {
+        const err = new AppError({ code: ErrorCodes.INVALID_STATE, message: 'Method Not Allowed', httpStatus: 405, retryable: false });
+        logError({ requestId, endpoint: 'generateChangeText', err });
+        return sendError(res, err, requestId);
+      }
       
       let uid;
       try {
         uid = await verifyAuth(req);
       } catch (e) {
-        return res.status(401).json({ error: e.message });
+        const err = unauthenticated(e?.message || 'Unauthorized');
+        logError({ requestId, endpoint: 'generateChangeText', err });
+        return sendError(res, err, requestId);
       }
 
       try {
@@ -450,7 +482,9 @@ exports.generateChangeText = onRequest(
           const bpText = fields.blueprint || fields.blueprintText;
 
           if (!bpText) {
-            return res.status(400).json({ error: 'Missing required fields: blueprint' });
+            const err = validationError({ blueprint: 'required' });
+            logError({ requestId, uid, endpoint: 'generateChangeText', err });
+            return sendError(res, err, requestId);
           }
 
           if (!imageBuffer) {
@@ -466,7 +500,9 @@ exports.generateChangeText = onRequest(
                 const file = bucket.file(storagePath);
                 const [exists] = await file.exists();
                 if (!exists) {
-                  return res.status(404).json({ error: 'Image not found at storagePath' });
+                  const err = new AppError({ code: ErrorCodes.VALIDATION_ERROR, message: 'Image not found at storagePath', httpStatus: 404, retryable: false });
+                  logError({ requestId, uid, endpoint: 'generateChangeText', err });
+                  return sendError(res, err, requestId);
                 }
 
                 const [metadata] = await file.getMetadata();
@@ -475,18 +511,23 @@ exports.generateChangeText = onRequest(
                 const [downloadedBuffer] = await file.download();
                 imageBuffer = downloadedBuffer;
               } catch (e) {
-                console.error('Error downloading from storage:', e);
-                return res.status(500).json({ error: 'Failed to download image from storage' });
+                const err = storageError('Failed to download image from storage', true);
+                logError({ requestId, uid, endpoint: 'generateChangeText', err });
+                return sendError(res, err, requestId);
               }
             } else {
-              return res.status(400).json({ error: 'Missing required fields: croppedImage or storagePath' });
+              const err = validationError({ croppedImage: 'required', storagePath: 'required' });
+              logError({ requestId, uid, endpoint: 'generateChangeText', err });
+              return sendError(res, err, requestId);
             }
           }
           let blueprint;
           try {
             blueprint = JSON.parse(bpText);
           } catch (_) {
-            return res.status(400).json({ error: 'Invalid blueprint JSON format' });
+            const err = validationError({ blueprint: 'invalid JSON' });
+            logError({ requestId, uid, endpoint: 'generateChangeText', err });
+            return sendError(res, err, requestId);
           }
 
           const out = await generateChangeText({
@@ -502,7 +543,9 @@ exports.generateChangeText = onRequest(
         const body = req.body || {};
         // const uid = String(body.uid || '').trim(); // Removed
         if (!body.blueprint || !(body.croppedImageBase64 || body.croppedImage)) {
-          return res.status(400).json({ error: 'Missing required fields: blueprint, croppedImageBase64' });
+          const err = validationError({ blueprint: !body.blueprint ? 'required' : undefined, croppedImageBase64: !(body.croppedImageBase64 || body.croppedImage) ? 'required' : undefined });
+          logError({ requestId, uid, endpoint: 'generateChangeText', err });
+          return sendError(res, err, requestId);
         }
         const blueprint = typeof body.blueprint === 'string' ? JSON.parse(body.blueprint) : body.blueprint;
         const out = await generateChangeText({
@@ -513,8 +556,9 @@ exports.generateChangeText = onRequest(
         });
         res.status(200).json(out);
       } catch (err) {
-        console.error('generateChangeText error:', err?.message || err);
-        res.status(500).json({ error: 'Internal Server Error' });
+        const appErr = normalizeUnknownError(err);
+        logError({ requestId, uid, endpoint: 'generateChangeText', err: appErr });
+        return sendError(res, appErr, requestId);
       }
     });
   }

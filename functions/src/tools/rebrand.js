@@ -8,6 +8,18 @@ const { createMultipartParser, buildGeneratedImagePath, verifyAuth } = require('
 const { ensureUserExists, decrementUsage } = require('../operations/userOperations');
 const { initGenkit, GOOGLE_API_KEY } = require('../common/genkit');
 const { buildRebrandPrompt, buildSmartBlueprintPrompt } = require('../common/prompts');
+const {
+  AppError,
+  ErrorCodes,
+  unauthenticated,
+  validationError,
+  providerTimeout,
+  providerUnavailable,
+  providerRejected,
+  sendError,
+  normalizeUnknownError,
+  logError,
+} = require('../common/errors');
 
 try {
   if (!admin.apps.length) {
@@ -472,6 +484,7 @@ exports.generateRebrand = onRequest(
     secrets: [GOOGLE_API_KEY],
   },
   async (req, res) => {
+    const requestId = randomUUID();
     // Handle CORS preflight explicitly for some clients
     if (req.method === 'OPTIONS') {
       res.set('Access-Control-Allow-Origin', '*');
@@ -482,19 +495,30 @@ exports.generateRebrand = onRequest(
 
     return cors(req, res, async () => {
       if (req.method !== 'POST') {
-        return res.status(405).json({ error: 'Method not allowed. Use POST.' });
+        const err = new AppError({
+          code: ErrorCodes.INVALID_STATE,
+          message: 'Method not allowed. Use POST.',
+          httpStatus: 405,
+          retryable: false,
+        });
+        logError({ requestId, endpoint: 'generateRebrand', err });
+        return sendError(res, err, requestId);
       }
 
       let uid;
       try {
         uid = await verifyAuth(req);
       } catch (e) {
-        return res.status(401).json({ error: e.message });
+        const err = unauthenticated(e?.message || 'Unauthorized');
+        logError({ requestId, endpoint: 'generateRebrand', err });
+        return sendError(res, err, requestId);
       }
 
       // Check for multipart/form-data
       if (!req.headers['content-type'] || !req.headers['content-type'].includes('multipart/form-data')) {
-        return res.status(400).json({ error: 'Content-Type must be multipart/form-data' });
+        const err = validationError({ 'content-type': 'must be multipart/form-data' });
+        logError({ requestId, uid, endpoint: 'generateRebrand', err });
+        return sendError(res, err, requestId);
       }
 
       const busboy = createMultipartParser(req.headers);
@@ -534,7 +558,9 @@ exports.generateRebrand = onRequest(
         const { brand_id, blueprint, storagePath } = fields;
 
         if (!brand_id || !blueprint) {
-          return res.status(400).json({ error: 'Missing required fields: brand_id, blueprint' });
+          const err = validationError({ brand_id: !brand_id ? 'required' : undefined, blueprint: !blueprint ? 'required' : undefined });
+          logError({ requestId, uid, endpoint: 'generateRebrand', err });
+          return sendError(res, err, requestId);
         }
 
         if (!imageBuffer) {
@@ -549,7 +575,14 @@ exports.generateRebrand = onRequest(
               const file = bucket.file(storagePath);
               const [exists] = await file.exists();
               if (!exists) {
-                return res.status(404).json({ error: 'Image not found at storagePath' });
+                const err = new AppError({
+                  code: ErrorCodes.VALIDATION_ERROR,
+                  message: 'Image not found at storagePath',
+                  httpStatus: 404,
+                  retryable: false,
+                });
+                logError({ requestId, uid, endpoint: 'generateRebrand', err });
+                return sendError(res, err, requestId);
               }
 
               const [metadata] = await file.getMetadata();
@@ -558,18 +591,28 @@ exports.generateRebrand = onRequest(
               const [downloadedBuffer] = await file.download();
               imageBuffer = downloadedBuffer;
             } catch (e) {
-              console.error('Error downloading from storage:', e);
-              return res.status(500).json({ error: 'Failed to download image from storage' });
+              const err = storageError('Failed to download image from storage', true);
+              logError({ requestId, uid, endpoint: 'generateRebrand', err });
+              return sendError(res, err, requestId);
             }
           } else {
-            return res.status(400).json({ error: 'Missing required file: croppedImage or field: storagePath' });
+            const err = validationError({ croppedImage: 'required', storagePath: 'required' });
+            logError({ requestId, uid, endpoint: 'generateRebrand', err });
+            return sendError(res, err, requestId);
           }
         }
 
         // Fetch brand from Firestore
         const brandDoc = await db.collection('users').doc(uid).collection('brands').doc(brand_id).get();
         if (!brandDoc.exists) {
-          return res.status(404).json({ error: 'Brand not found' });
+          const err = new AppError({
+            code: ErrorCodes.VALIDATION_ERROR,
+            message: 'Brand not found',
+            httpStatus: 404,
+            retryable: false,
+          });
+          logError({ requestId, uid, endpoint: 'generateRebrand', err });
+          return sendError(res, err, requestId);
         }
 
         const brandData = brandDoc.data();
@@ -578,7 +621,9 @@ exports.generateRebrand = onRequest(
         try {
           parsedBlueprint = JSON.parse(blueprint);
         } catch (e) {
-          return res.status(400).json({ error: 'Invalid blueprint JSON format' });
+          const err = validationError({ blueprint: 'invalid JSON' });
+          logError({ requestId, uid, endpoint: 'generateRebrand', err });
+          return sendError(res, err, requestId);
         }
 
         const croppedImageBase64 = imageBuffer.toString('base64');
@@ -595,14 +640,13 @@ exports.generateRebrand = onRequest(
         return res.status(200).json(result);
       } catch (err) {
         if (err && (err.name === 'ZodError' || err.issues)) {
-          return res
-            .status(400)
-            .json({ error: 'Invalid input', details: err.issues || String(err) });
+          const appErr = validationError(err.issues || String(err));
+          logError({ requestId, endpoint: 'generateRebrand', err: appErr });
+          return sendError(res, appErr, requestId);
         }
-        console.error('generateRebrand error:', err);
-        return res
-          .status(500)
-          .json({ error: 'Internal error generating image', details: String(err.message || err) });
+        const appErr = normalizeUnknownError(err);
+        logError({ requestId, endpoint: 'generateRebrand', err: appErr });
+        return sendError(res, appErr, requestId);
       }
     });
   },
@@ -617,6 +661,7 @@ exports.generateSmartBlueprint = onRequest(
     secrets: [GOOGLE_API_KEY],
   },
   async (req, res) => {
+    const requestId = randomUUID();
     if (req.method === 'OPTIONS') {
       res.set('Access-Control-Allow-Origin', '*');
       res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -625,19 +670,30 @@ exports.generateSmartBlueprint = onRequest(
     }
     return cors(req, res, async () => {
       if (req.method !== 'POST') {
-        return res.status(405).json({ error: 'Method not allowed. Use POST.' });
+        const err = new AppError({
+          code: ErrorCodes.INVALID_STATE,
+          message: 'Method not allowed. Use POST.',
+          httpStatus: 405,
+          retryable: false,
+        });
+        logError({ requestId, endpoint: 'generateSmartBlueprint', err });
+        return sendError(res, err, requestId);
       }
 
       let user_id;
       try {
         user_id = await verifyAuth(req);
       } catch (e) {
-        return res.status(401).json({ error: e.message });
+        const err = unauthenticated(e?.message || 'Unauthorized');
+        logError({ requestId, endpoint: 'generateSmartBlueprint', err });
+        return sendError(res, err, requestId);
       }
 
       // Check for multipart/form-data
       if (!req.headers['content-type'] || !req.headers['content-type'].includes('multipart/form-data')) {
-        return res.status(400).json({ error: 'Content-Type must be multipart/form-data' });
+        const err = validationError({ 'content-type': 'must be multipart/form-data' });
+        logError({ requestId, uid: user_id, endpoint: 'generateSmartBlueprint', err });
+        return sendError(res, err, requestId);
       }
 
       const busboy = createMultipartParser(req.headers);
@@ -675,7 +731,9 @@ exports.generateSmartBlueprint = onRequest(
         const { brand_id, updateFields, storagePath } = fields;
 
         if (!brand_id || !updateFields) {
-          return res.status(400).json({ error: 'Missing required fields: brand_id, updateFields' });
+          const err = validationError({ brand_id: !brand_id ? 'required' : undefined, updateFields: !updateFields ? 'required' : undefined });
+          logError({ requestId, uid: user_id, endpoint: 'generateSmartBlueprint', err });
+          return sendError(res, err, requestId);
         }
 
         if (!imageBuffer) {
@@ -690,23 +748,40 @@ exports.generateSmartBlueprint = onRequest(
               const file = bucket.file(storagePath);
               const [exists] = await file.exists();
               if (!exists) {
-                return res.status(404).json({ error: 'Image not found at storagePath' });
+                const err = new AppError({
+                  code: ErrorCodes.VALIDATION_ERROR,
+                  message: 'Image not found at storagePath',
+                  httpStatus: 404,
+                  retryable: false,
+                });
+                logError({ requestId, uid: user_id, endpoint: 'generateSmartBlueprint', err });
+                return sendError(res, err, requestId);
               }
               const [downloadedBuffer] = await file.download();
               imageBuffer = downloadedBuffer;
             } catch (e) {
-              console.error('Error downloading from storage:', e);
-              return res.status(500).json({ error: 'Failed to download image from storage' });
+              const err = storageError('Failed to download image from storage', true);
+              logError({ requestId, uid: user_id, endpoint: 'generateSmartBlueprint', err });
+              return sendError(res, err, requestId);
             }
           } else {
-            return res.status(400).json({ error: 'Missing required file: croppedImage or field: storagePath' });
+            const err = validationError({ croppedImage: 'required', storagePath: 'required' });
+            logError({ requestId, uid: user_id, endpoint: 'generateSmartBlueprint', err });
+            return sendError(res, err, requestId);
           }
         }
 
         // Fetch brand from Firestore
         const brandDoc = await db.collection('users').doc(user_id).collection('brands').doc(brand_id).get();
         if (!brandDoc.exists) {
-          return res.status(404).json({ error: 'Brand not found' });
+          const err = new AppError({
+            code: ErrorCodes.VALIDATION_ERROR,
+            message: 'Brand not found',
+            httpStatus: 404,
+            retryable: false,
+          });
+          logError({ requestId, uid: user_id, endpoint: 'generateSmartBlueprint', err });
+          return sendError(res, err, requestId);
         }
 
         const brandData = brandDoc.data();
@@ -716,8 +791,9 @@ exports.generateSmartBlueprint = onRequest(
         try {
           parsedUpdateFields = JSON.parse(updateFields);
         } catch (e) {
-          console.warn('Invalid updateFields JSON', e);
-          return res.status(400).json({ error: 'Invalid updateFields JSON format' });
+          const err = validationError({ updateFields: 'invalid JSON' });
+          logError({ requestId, uid: user_id, endpoint: 'generateSmartBlueprint', err });
+          return sendError(res, err, requestId);
         }
 
         const imageBase64 = imageBuffer.toString('base64');
@@ -734,14 +810,13 @@ exports.generateSmartBlueprint = onRequest(
         return res.status(200).json(llmResult);
       } catch (err) {
         if (err && (err.name === 'ZodError' || err.issues)) {
-          return res
-            .status(400)
-            .json({ error: 'Invalid input', details: err.issues || String(err) });
+          const appErr = validationError(err.issues || String(err));
+          logError({ requestId, endpoint: 'generateSmartBlueprint', err: appErr });
+          return sendError(res, appErr, requestId);
         }
-        console.error('generateSmartBlueprint error:', err);
-        return res
-          .status(500)
-          .json({ error: 'Internal error', details: String(err?.message || err) });
+        const appErr = normalizeUnknownError(err);
+        logError({ requestId, endpoint: 'generateSmartBlueprint', err: appErr });
+        return sendError(res, appErr, requestId);
       }
     });
   },

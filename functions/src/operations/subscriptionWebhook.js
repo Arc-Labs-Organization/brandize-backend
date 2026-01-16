@@ -1,8 +1,10 @@
 const { onRequest } = require('firebase-functions/v2/https');
+const { randomUUID } = require('crypto');
 const { defineSecret } = require('firebase-functions/params');
 const admin = require('firebase-admin');
 const { getFirestore, FieldValue, Timestamp } = require('firebase-admin/firestore');
 const { SUBSCRIPTION_TIERS, ENTITLEMENT_TO_TIER } = require('../common/subscriptionConfig');
+const { AppError, ErrorCodes, validationError, unauthenticated, logError, normalizeUnknownError } = require('../common/errors');
 
 const db = getFirestore();
 
@@ -19,17 +21,27 @@ const revenueCatWebhook = onRequest(
     // No CORS needed for server-to-server webhooks
   },
   async (req, res) => {
+        const requestId = randomUUID();
+        res.set('X-Request-ID', requestId);
+        if (req.method !== 'POST') {
+            const err = new AppError({ code: ErrorCodes.INVALID_STATE, message: 'Method not allowed. Use POST.', httpStatus: 405, retryable: false });
+            logError({ requestId, endpoint: 'revenueCatWebhook', err });
+            return res.status(405).send('Method Not Allowed');
+        }
     // 1. Security Check
     const authHeader = req.headers.authorization;
     if (authHeader !== REVENUECAT_WEBHOOK_AUTH.value()) {
-      console.warn('Unauthorized webhook attempt');
-      return res.status(401).send('Unauthorized');
+            const err = unauthenticated('Unauthorized webhook attempt');
+            logError({ requestId, endpoint: 'revenueCatWebhook', err });
+            return res.status(401).send('Unauthorized');
     }
 
 
     const event = req.body && req.body.event;
     if (!event) {
-      return res.status(400).send('No event body');
+            const err = validationError({ event: 'required' });
+            logError({ requestId, endpoint: 'revenueCatWebhook', err });
+            return res.status(400).send('No event body');
     }
 
     let { type, app_user_id, product_id, entitlement_ids, expiration_at_ms, transferred_from, transferred_to, store } = event;
@@ -265,8 +277,9 @@ const revenueCatWebhook = onRequest(
         return res.status(200).send('OK');
 
     } catch (error) {
-        console.error('Error processing webhook:', error);
-        return res.status(500).send('Error');
+        const appErr = normalizeUnknownError(error);
+        logError({ requestId, endpoint: 'revenueCatWebhook', err: appErr });
+        return res.status(appErr.httpStatus || 500).send('Error');
     }
   }
 );

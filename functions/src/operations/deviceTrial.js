@@ -72,6 +72,7 @@ const verifyAppleDeviceTrial = onCall({
   region: 'europe-west1',
   secrets: [APPLE_PRIVATE_KEY, APPLE_KEY_ID, APPLE_TEAM_ID],
 }, async (request) => {
+  const requestId = crypto.randomUUID();
   const context = request;
   const startedAt = Date.now();
   const trace =
@@ -90,6 +91,7 @@ const verifyAppleDeviceTrial = onCall({
 
   logger.info('verifyAppleDeviceTrial:start', {
     uid,
+    requestId,
     traceId,
     hasInputToken: typeof inputToken === 'string' && inputToken.length > 0,
     inputTokenLen: typeof inputToken === 'string' ? inputToken.length : 0,
@@ -154,6 +156,7 @@ const verifyAppleDeviceTrial = onCall({
 
   logger.info('verifyAppleDeviceTrial:apple_endpoints', {
     uid,
+    requestId,
     traceId,
     baseUrl,
   });
@@ -200,12 +203,24 @@ const verifyAppleDeviceTrial = onCall({
     const body = e.response && e.response.data;
     logger.error('verifyAppleDeviceTrial:query_two_bits_error', {
       uid,
+      requestId,
       traceId,
       transactionId: transactionId1,
       status,
       body,
       message: e && e.message,
     });
+    // Map provider errors to more specific codes
+    const isTimeout = e.code === 'ECONNABORTED' || /timeout/i.test(String(e.message || ''));
+    if (isTimeout) {
+      throw new HttpsError('deadline-exceeded', 'Apple DeviceCheck timeout.');
+    }
+    if (status === 401 || status === 403) {
+      throw new HttpsError('failed-precondition', 'Apple DeviceCheck authentication or permission error.');
+    }
+    if (status >= 500) {
+      throw new HttpsError('unavailable', 'Apple DeviceCheck service unavailable.');
+    }
     throw new HttpsError('internal', 'Failed to query device trial state.');
   }
 
@@ -235,17 +250,28 @@ const verifyAppleDeviceTrial = onCall({
       { headers },
     );
 
-    logger.info('verifyAppleDeviceTrial:lock_acquired', { uid, traceId });
+    logger.info('verifyAppleDeviceTrial:lock_acquired', { uid, requestId, traceId });
   } catch (e) {
     const status = e.response && e.response.status;
     const body = e.response && e.response.data;
     logger.error('verifyAppleDeviceTrial:lock_error', {
       uid,
+      requestId,
       traceId,
       status,
       body,
       message: e && e.message,
     });
+    const isTimeout = e.code === 'ECONNABORTED' || /timeout/i.test(String(e.message || ''));
+    if (isTimeout) {
+      throw new HttpsError('deadline-exceeded', 'Apple DeviceCheck timeout during lock.');
+    }
+    if (status === 401 || status === 403) {
+      throw new HttpsError('failed-precondition', 'Apple DeviceCheck authentication or permission error.');
+    }
+    if (status >= 500) {
+      throw new HttpsError('unavailable', 'Apple DeviceCheck service unavailable.');
+    }
     throw new HttpsError('internal', 'Failed to reserve device trial state.');
   }
 
@@ -371,6 +397,7 @@ const verifyAppleDeviceTrial = onCall({
   } catch (e) {
     logger.error('verifyAppleDeviceTrial:firestore_grant_error', {
       uid,
+      requestId,
       traceId,
       message: e && e.message,
       stack: e && e.stack,
@@ -413,6 +440,7 @@ const verifyAppleDeviceTrial = onCall({
     const body = e.response && e.response.data;
     logger.error('verifyAppleDeviceTrial:finalize_error', {
       uid,
+      requestId,
       traceId,
       transactionId: transactionId2,
       status,
@@ -431,6 +459,7 @@ const verifyAppleDeviceTrial = onCall({
 
   logger.info('verifyAppleDeviceTrial:success', {
     uid,
+    requestId,
     traceId,
     creditsGrantedTotal,
     durationMs: Date.now() - startedAt,
@@ -450,6 +479,7 @@ const resetAppleDeviceTrialDev = onCall(
     secrets: [APPLE_PRIVATE_KEY, APPLE_KEY_ID, APPLE_TEAM_ID],
   },
   async (request) => {
+    const requestId = crypto.randomUUID();
     if (!request.auth?.uid) {
       throw new HttpsError('unauthenticated', 'Authentication required.');
     }
@@ -499,6 +529,7 @@ const resetAppleDeviceTrialDev = onCall(
     } catch (e) {
       logger.error('resetAppleDeviceTrialDev:jwt_sign_error', {
         uid,
+        requestId,
         message: e && e.message,
       });
       throw new HttpsError('internal', 'Failed to generate Apple auth token.');
@@ -530,6 +561,7 @@ const resetAppleDeviceTrialDev = onCall(
     } catch (e) {
       logger.warn('resetAppleDeviceTrialDev:query_before_failed', {
         uid,
+        requestId,
         tokenHashPrefix,
         status: e?.response?.status,
       });
@@ -550,6 +582,7 @@ const resetAppleDeviceTrialDev = onCall(
     } catch (e) {
       logger.error('resetAppleDeviceTrialDev:update_error', {
         uid,
+        requestId,
         tokenHashPrefix,
         status: e?.response?.status,
         body: e?.response?.data,
@@ -581,6 +614,7 @@ const resetAppleDeviceTrialDev = onCall(
       } catch (e) {
         logger.warn('resetAppleDeviceTrialDev:firestore_reset_failed', {
           uid,
+          requestId,
           message: e && e.message,
         });
       }
@@ -588,6 +622,7 @@ const resetAppleDeviceTrialDev = onCall(
 
     logger.info('resetAppleDeviceTrialDev:ok', {
       uid,
+      requestId,
       tokenHashPrefix,
       before,
       firestoreReset,

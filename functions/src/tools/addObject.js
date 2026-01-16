@@ -8,6 +8,16 @@ const { createAndUploadThumbnail, computeThumbPath } = require('../operations/th
 const { ensureUserExists, decrementUsage } = require('../operations/userOperations');
 const { initGenkit, GOOGLE_API_KEY } = require('../common/genkit');
 const { buildAddObjectPrompt } = require('../common/prompts');
+const {
+	AppError,
+	ErrorCodes,
+	unauthenticated,
+	validationError,
+	storageError,
+	sendError,
+	normalizeUnknownError,
+	logError,
+} = require('../common/errors');
 
 try {
 	if (!admin.apps.length) {
@@ -380,6 +390,7 @@ exports.generateAddObject = onRequest(
 		secrets: [GOOGLE_API_KEY],
 	},
 	async (req, res) => {
+			const requestId = randomUUID();
 		if (req.method === 'OPTIONS') {
 			res.set('Access-Control-Allow-Origin', '*');
 			res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -388,12 +399,23 @@ exports.generateAddObject = onRequest(
 		}
 
 		return cors(req, res, async () => {
-			if (req.method !== 'POST') return res.status(405).json({ error: 'Method Not Allowed' });
+				if (req.method !== 'POST') {
+					const err = new AppError({
+						code: ErrorCodes.INVALID_STATE,
+						message: 'Method Not Allowed',
+						httpStatus: 405,
+						retryable: false,
+					});
+					logError({ requestId, endpoint: 'generateAddObject', err });
+					return sendError(res, err, requestId);
+				}
 
 			try {
 				uid = await verifyAuth(req);
 			} catch (e) {
-				return res.status(401).json({ error: e.message });
+					const err = unauthenticated(e?.message || 'Unauthorized');
+					logError({ requestId, endpoint: 'generateAddObject', err });
+					return sendError(res, err, requestId);
 			}
 
 			try {
@@ -439,7 +461,9 @@ exports.generateAddObject = onRequest(
 					const aspectRatio = String(fields.aspectRatio || '').trim() || undefined;
 
 					if (!objectBuffer || !objectLocation) {
-						return res.status(400).json({ error: 'Missing required fields: object_img, object_location' });
+						const err = validationError({ object_img: !objectBuffer ? 'required' : undefined, object_location: !objectLocation ? 'required' : undefined });
+						logError({ requestId, uid, endpoint: 'generateAddObject', err });
+						return sendError(res, err, requestId);
 					}
 
 					if (!croppedBuffer) {
@@ -455,7 +479,14 @@ exports.generateAddObject = onRequest(
 								const file = bucket.file(storagePath);
 								const [exists] = await file.exists();
 								if (!exists) {
-									return res.status(404).json({ error: 'Image not found at storagePath' });
+									const err = new AppError({
+										code: ErrorCodes.VALIDATION_ERROR,
+										message: 'Image not found at storagePath',
+										httpStatus: 404,
+										retryable: false,
+									});
+									logError({ requestId, uid, endpoint: 'generateAddObject', err });
+									return sendError(res, err, requestId);
 								}
 
 								const [metadata] = await file.getMetadata();
@@ -464,11 +495,14 @@ exports.generateAddObject = onRequest(
 								const [downloadedBuffer] = await file.download();
 								croppedBuffer = downloadedBuffer;
 							} catch (e) {
-								console.error('Error downloading from storage:', e);
-								return res.status(500).json({ error: 'Failed to download image from storage' });
+								const err = storageError('Failed to download image from storage', true);
+								logError({ requestId, uid, endpoint: 'generateAddObject', err });
+								return sendError(res, err, requestId);
 							}
 						} else {
-							return res.status(400).json({ error: 'Missing required fields: cropped_img or storagePath' });
+							const err = validationError({ cropped_img: 'required', storagePath: 'required' });
+							logError({ requestId, uid, endpoint: 'generateAddObject', err });
+							return sendError(res, err, requestId);
 						}
 					}
 
@@ -491,7 +525,9 @@ exports.generateAddObject = onRequest(
 				const objectLocation = String(body.objectLocation || body.object_location || '').trim();
 				const aspectRatio = body.aspectRatio;
 				if (!croppedBase64 || !objectBase64 || !objectLocation) {
-					return res.status(400).json({ error: 'Missing required fields: croppedImageBase64, objectImageBase64, object_location' });
+					const err = validationError({ croppedImageBase64: !croppedBase64 ? 'required' : undefined, objectImageBase64: !objectBase64 ? 'required' : undefined, object_location: !objectLocation ? 'required' : undefined });
+					logError({ requestId, uid, endpoint: 'generateAddObject', err });
+					return sendError(res, err, requestId);
 				}
 				const out = await generateAddObject({
 					uid,
@@ -504,8 +540,9 @@ exports.generateAddObject = onRequest(
 				});
 				return res.status(200).json(out);
 			} catch (err) {
-				console.error('generateAddObject error:', err?.message || err);
-				return res.status(500).json({ error: 'Internal Server Error' });
+				const appErr = normalizeUnknownError(err);
+				logError({ requestId, uid, endpoint: 'generateAddObject', err: appErr });
+				return sendError(res, appErr, requestId);
 			}
 		});
 	}

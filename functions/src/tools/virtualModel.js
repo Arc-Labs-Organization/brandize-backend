@@ -8,6 +8,16 @@ const { createAndUploadThumbnail, computeThumbPath } = require('../operations/th
 const { ensureUserExists, decrementUsage } = require('../operations/userOperations');
 const { initGenkit, GOOGLE_API_KEY } = require('../common/genkit');
 const { buildVirtualModelPrompt } = require('../common/prompts');
+const {
+	AppError,
+	ErrorCodes,
+	unauthenticated,
+	validationError,
+	storageError,
+	sendError,
+	normalizeUnknownError,
+	logError,
+} = require('../common/errors');
 
 try {
 	if (!admin.apps.length) {
@@ -278,6 +288,7 @@ exports.generateVirtualModel = onRequest(
 		secrets: [GOOGLE_API_KEY],
 	},
 	async (req, res) => {
+		const requestId = randomUUID();
 		if (req.method === 'OPTIONS') {
 			res.set('Access-Control-Allow-Origin', '*');
 			res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -286,13 +297,19 @@ exports.generateVirtualModel = onRequest(
 		}
 
 		return cors(req, res, async () => {
-			if (req.method !== 'POST') return res.status(405).json({ error: 'Method Not Allowed' });
+			if (req.method !== 'POST') {
+				const err = new AppError({ code: ErrorCodes.INVALID_STATE, message: 'Method Not Allowed', httpStatus: 405, retryable: false });
+				logError({ requestId, endpoint: 'generateVirtualModel', err });
+				return sendError(res, err, requestId);
+			}
 
 			let uid;
 			try {
 				uid = await verifyAuth(req);
 			} catch (e) {
-				return res.status(401).json({ error: e.message });
+				const err = unauthenticated(e?.message || 'Unauthorized');
+				logError({ requestId, endpoint: 'generateVirtualModel', err });
+				return sendError(res, err, requestId);
 			}
 
 			try {
@@ -339,7 +356,9 @@ exports.generateVirtualModel = onRequest(
 					const aspectRatio = String(fields.aspectRatio || '').trim() || undefined;
 
 					if (!mode || (mode !== 'hold' && mode !== 'wear')) {
-						return res.status(400).json({ error: 'Missing or invalid field: mode (must be hold|wear)' });
+						const err = validationError({ mode: 'must be hold|wear' });
+						logError({ requestId, uid, endpoint: 'generateVirtualModel', err });
+						return sendError(res, err, requestId);
 					}
 
 					// If modelBuffer missing, load from storagePath (required alternative to file)
@@ -356,7 +375,9 @@ exports.generateVirtualModel = onRequest(
 								const file = bucket.file(storagePath);
 								const [exists] = await file.exists();
 								if (!exists) {
-									return res.status(404).json({ error: 'Model image not found at storagePath' });
+									const err = new AppError({ code: ErrorCodes.VALIDATION_ERROR, message: 'Model image not found at storagePath', httpStatus: 404, retryable: false });
+									logError({ requestId, uid, endpoint: 'generateVirtualModel', err });
+									return sendError(res, err, requestId);
 								}
 
 								const [metadata] = await file.getMetadata();
@@ -365,17 +386,22 @@ exports.generateVirtualModel = onRequest(
 								const [downloadedBuffer] = await file.download();
 								modelBuffer = downloadedBuffer;
 							} catch (e) {
-								console.error('Error downloading model from storage:', e);
-								return res.status(500).json({ error: 'Failed to download model image from storage' });
+								const err = storageError('Failed to download model image from storage', true);
+								logError({ requestId, uid, endpoint: 'generateVirtualModel', err });
+								return sendError(res, err, requestId);
 							}
 						} else {
-							return res.status(400).json({ error: 'Missing required fields: cropped_img or modelStoragePath' });
+							const err = validationError({ cropped_img: 'required', modelStoragePath: 'required' });
+							logError({ requestId, uid, endpoint: 'generateVirtualModel', err });
+							return sendError(res, err, requestId);
 						}
 					}
 
 					// product image must be provided as file in multipart
 					if (!productBuffer) {
-						return res.status(400).json({ error: 'Missing required field: product_img (file)' });
+						const err = validationError({ product_img: 'file required' });
+						logError({ requestId, uid, endpoint: 'generateVirtualModel', err });
+						return sendError(res, err, requestId);
 					}
 
 					const out = await generateVirtualModel({
@@ -392,10 +418,17 @@ exports.generateVirtualModel = onRequest(
 				}
 
 				// JSON body is not supported for product file upload; instruct clients to use multipart/form-data
-				return res.status(400).json({ error: 'Use multipart/form-data with product_img (file) and either cropped_img (file) or modelStoragePath' });
+				const err = validationError({
+					product_img: 'use multipart/form-data (file)',
+					cropped_img: 'multipart file or modelStoragePath',
+					modelStoragePath: 'multipart alternative to cropped_img',
+				});
+				logError({ requestId, uid, endpoint: 'generateVirtualModel', err });
+				return sendError(res, err, requestId);
 			} catch (err) {
-				console.error('generateVirtualModel error:', err?.message || err);
-				return res.status(500).json({ error: 'Internal Server Error' });
+				const appErr = normalizeUnknownError(err);
+				logError({ requestId, uid, endpoint: 'generateVirtualModel', err: appErr });
+				return sendError(res, appErr, requestId);
 			}
 		});
 	}

@@ -1,5 +1,6 @@
 const { randomUUID } = require('crypto');
 const sharp = require('sharp');
+const { storageError } = require('../common/errors');
 
 /**
  * Compute thumbnail path from original Storage path.
@@ -16,7 +17,8 @@ function computeThumbPath(storagePath) {
  * - fit: 'cover', quality: 80
  * - cacheControl: 'public, max-age=31536000'
  */
-async function createAndUploadThumbnail(bucket, originalBuffer, originalStoragePath) {
+async function createAndUploadThumbnail(bucket, originalBuffer, originalStoragePath, options = {}) {
+  const strict = options.strict === true;
   const thumbPath = computeThumbPath(originalStoragePath);
   let thumbUrl = null;
   try {
@@ -54,8 +56,15 @@ async function createAndUploadThumbnail(bucket, originalBuffer, originalStorageP
       thumbUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(thumbPath)}?alt=media&token=${tkn}`;
     }
   } catch (err) {
-    // Log upstream; return null URL
-    console.warn('Thumbnail creation/upload failed:', err?.message || err);
+    // Log upstream; optionally throw standardized storage error
+    console.warn('Thumbnail creation/upload failed:', {
+      message: err?.message || String(err),
+      bucket: bucket?.name,
+      thumbPath,
+    });
+    if (strict) {
+      throw storageError('THUMBNAIL_UPLOAD_FAILED', true, { path: thumbPath });
+    }
     thumbUrl = null;
   }
   return { thumbPath, thumbUrl };

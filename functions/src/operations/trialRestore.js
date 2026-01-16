@@ -31,6 +31,7 @@ const restoreTrialCredits = onCall(
     region: 'europe-west1',
   },
   async (request) => {
+    const requestId = crypto.randomUUID();
     if (!request.auth?.uid) {
       throw new HttpsError('unauthenticated', 'Authentication required.');
     }
@@ -69,6 +70,7 @@ const restoreTrialCredits = onCall(
 
     logger.info('restoreTrialCredits:start', {
       uid,
+      requestId,
       restoreKeyPrefix: restoreKey.slice(0, 10),
     });
 
@@ -78,44 +80,51 @@ const restoreTrialCredits = onCall(
       await ensureUserExists(uid);
     } catch (e) {
       // best effort; continue
+      logger.warn('restoreTrialCredits:ensureUserExists_failed', {
+        uid,
+        requestId,
+        message: e && e.message,
+      });
     }
 
-    const result = await db.runTransaction(async (tx) => {
-      const restoreSnap = await tx.get(restoreRef);
-      if (!restoreSnap.exists) {
-        return { restored: 0, reason: 'no_record' };
-      }
+    let result;
+    try {
+      result = await db.runTransaction(async (tx) => {
+        const restoreSnap = await tx.get(restoreRef);
+        if (!restoreSnap.exists) {
+          return { restored: 0, reason: 'no_record' };
+        }
 
-      const restoreData = restoreSnap.data() || {};
-      const fromUid = restoreData.lastUid || restoreData.firstUid;
-      if (!fromUid || typeof fromUid !== 'string') {
-        return { restored: 0, reason: 'no_source_uid' };
-      }
+        const restoreData = restoreSnap.data() || {};
+        const fromUid = restoreData.lastUid || restoreData.firstUid;
+        if (!fromUid || typeof fromUid !== 'string') {
+          return { restored: 0, reason: 'no_source_uid' };
+        }
 
-      if (fromUid === uid) {
-        tx.set(
-          restoreRef,
-          { lastSeenAt: FieldValue.serverTimestamp() },
-          { merge: true },
-        );
-        return { restored: 0, reason: 'same_uid' };
-      }
+        if (fromUid === uid) {
+          tx.set(
+            restoreRef,
+            { lastSeenAt: FieldValue.serverTimestamp() },
+            { merge: true },
+          );
+          return { restored: 0, reason: 'same_uid' };
+        }
 
-      const fromUserRef = db.collection('users').doc(fromUid);
-      const fromSnap = await tx.get(fromUserRef);
-      const toSnap = await tx.get(userRef);
+        const fromUserRef = db.collection('users').doc(fromUid);
+        const fromSnap = await tx.get(fromUserRef);
+        const toSnap = await tx.get(userRef);
 
-      if (!fromSnap.exists) {
-        tx.set(
-          restoreRef,
-          { lastSeenAt: FieldValue.serverTimestamp(), lastUid: uid },
-          { merge: true },
-        );
-        return { restored: 0, reason: 'source_missing' };
-      }
+        if (!fromSnap.exists) {
+          tx.set(
+            restoreRef,
+            { lastSeenAt: FieldValue.serverTimestamp(), lastUid: uid },
+            { merge: true },
+          );
+          return { restored: 0, reason: 'source_missing' };
+        }
 
-      const fromData = fromSnap.data() || {};
-      const fromFree = fromData.freeCredits || {};
+        const fromData = fromSnap.data() || {};
+        const fromFree = fromData.freeCredits || {};
 
       let sourceGenLimit = 0;
       let sourceGenUsed = 0;
@@ -187,24 +196,24 @@ const restoreTrialCredits = onCall(
         finalDlUsed = sourceDlUsed;
       }
 
-      // Remove from old uid
-      tx.set(
-        fromUserRef,
-        {
-          // Clear legacy trial field to avoid double-counting
-          trialCreditsRemaining: 0,
-          freeCredits: {
-            generateLimit: 0,
-            downloadLimit: 0,
-            generationsUsed: 0,
-            downloadsUsed: 0,
-            generate: FieldValue.delete(),
-            download: FieldValue.delete(),
+        // Remove from old uid
+        tx.set(
+          fromUserRef,
+          {
+            // Clear legacy trial field to avoid double-counting
+            trialCreditsRemaining: 0,
+            freeCredits: {
+              generateLimit: 0,
+              downloadLimit: 0,
+              generationsUsed: 0,
+              downloadsUsed: 0,
+              generate: FieldValue.delete(),
+              download: FieldValue.delete(),
+            },
+            lastUsedAt: FieldValue.serverTimestamp(),
           },
-          lastUsedAt: FieldValue.serverTimestamp(),
-        },
-        { merge: true },
-      );
+          { merge: true },
+        );
 
       // Add to current uid
       tx.set(
@@ -226,16 +235,16 @@ const restoreTrialCredits = onCall(
         { merge: true },
       );
 
-      // Update restore record
-      tx.set(
-        restoreRef,
-        {
-          lastUid: uid,
-          lastSeenAt: FieldValue.serverTimestamp(),
-          lastRestoredAt: FieldValue.serverTimestamp(),
-        },
-        { merge: true },
-      );
+        // Update restore record
+        tx.set(
+          restoreRef,
+          {
+            lastUid: uid,
+            lastSeenAt: FieldValue.serverTimestamp(),
+            lastRestoredAt: FieldValue.serverTimestamp(),
+          },
+          { merge: true },
+        );
 
       return {
         restored: netGenRemaining + netDlRemaining,
@@ -246,6 +255,7 @@ const restoreTrialCredits = onCall(
 
     logger.info('restoreTrialCredits:done', {
       uid,
+      requestId,
       restored: result.restored,
       reason: result.reason,
       fromUid: result.fromUid,

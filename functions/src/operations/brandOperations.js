@@ -8,6 +8,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { createMultipartParser, verifyAuth } = require('../common/utils');
+const { AppError, ErrorCodes, unauthenticated, validationError, storageError, sendError, normalizeUnknownError, logError } = require('../common/errors');
 
 try {
   if (!admin.apps.length) {
@@ -28,6 +29,7 @@ exports.addBrand = onRequest(
     cors: true,
   },
   async (req, res) => {
+    const requestId = randomUUID();
     // CORS preflight
     if (req.method === 'OPTIONS') {
       res.set('Access-Control-Allow-Origin', '*');
@@ -38,14 +40,18 @@ exports.addBrand = onRequest(
 
     return cors(req, res, async () => {
       if (req.method !== 'POST') {
-        return res.status(405).json({ success: false, error: 'Method not allowed. Use POST.' });
+        const err = new AppError({ code: ErrorCodes.INVALID_STATE, message: 'Method not allowed. Use POST.', httpStatus: 405, retryable: false });
+        logError({ requestId, endpoint: 'addBrand', err });
+        return sendError(res, err, requestId);
       }
 
       let user_id;
       try {
         user_id = await verifyAuth(req);
       } catch (e) {
-        return res.status(401).json({ success: false, error: e.message });
+        const err = unauthenticated(e?.message || 'Unauthorized');
+        logError({ requestId, endpoint: 'addBrand', err });
+        return sendError(res, err, requestId);
       }
 
       let brandInfo;
@@ -105,7 +111,9 @@ exports.addBrand = onRequest(
           try {
             brandInfo = fields.brandInfo ? JSON.parse(fields.brandInfo) : null;
           } catch (e) {
-            return res.status(400).json({ success: false, error: 'Invalid brandInfo JSON' });
+            const err = validationError({ brandInfo: 'invalid JSON' });
+            logError({ requestId, endpoint: 'addBrand', err });
+            return sendError(res, err, requestId);
           }
         } else {
           console.log('Processing JSON request for addBrand');
@@ -114,13 +122,15 @@ exports.addBrand = onRequest(
         }
 
         if (!brandInfo || typeof brandInfo !== 'object') {
-          return res.status(400).json({ success: false, error: 'Missing required field: brandInfo' });
+          const err = validationError({ brandInfo: 'required' });
+          logError({ requestId, endpoint: 'addBrand', err });
+          return sendError(res, err, requestId);
         }
         const brandName = (brandInfo.brandName || '').toString().trim();
         if (!brandName) {
-          return res
-            .status(400)
-            .json({ success: false, error: 'Missing required field: brandInfo.brandName' });
+          const err = validationError({ 'brandInfo.brandName': 'required' });
+          logError({ requestId, endpoint: 'addBrand', err });
+          return sendError(res, err, requestId);
         }
 
         const brandsCol = db.collection('users').doc(user_id).collection('brands');
@@ -159,8 +169,8 @@ exports.addBrand = onRequest(
               console.log('Logo uploaded successfully, token url:', logoUrl);
             }
           } catch (uploadErr) {
-            console.error('Logo upload failed:', uploadErr);
-            throw new Error('Failed to upload logo: ' + uploadErr.message);
+            const err = storageError('Failed to upload logo', true, { reason: uploadErr?.message });
+            throw err;
           } finally {
             fs.unlink(logoFile.filepath, () => {});
           }
@@ -186,11 +196,10 @@ exports.addBrand = onRequest(
         await brandRef.set(docData);
         return res.status(200).json({ success: true, brandId: brandRef.id, logoUrl });
       } catch (err) {
-        console.error('addBrand error:', err);
         if (logoFile) fs.unlink(logoFile.filepath, () => {});
-        return res
-          .status(500)
-          .json({ success: false, error: 'Internal error creating brand', details: String(err?.message || err) });
+        const appErr = normalizeUnknownError(err);
+        logError({ requestId, uid: user_id, endpoint: 'addBrand', err: appErr });
+        return sendError(res, appErr, requestId);
       }
     });
   },
@@ -204,6 +213,7 @@ exports.updateBrand = onRequest(
     cors: true,
   },
   async (req, res) => {
+    const requestId = randomUUID();
     if (req.method === 'OPTIONS') {
       res.set('Access-Control-Allow-Origin', '*');
       res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -213,14 +223,18 @@ exports.updateBrand = onRequest(
 
     return cors(req, res, async () => {
       if (req.method !== 'POST') {
-        return res.status(405).json({ success: false, error: 'Method not allowed. Use POST.' });
+        const err = new AppError({ code: ErrorCodes.INVALID_STATE, message: 'Method not allowed. Use POST.', httpStatus: 405, retryable: false });
+        logError({ requestId, endpoint: 'updateBrand', err });
+        return sendError(res, err, requestId);
       }
 
       let user_id;
       try {
         user_id = await verifyAuth(req);
       } catch (e) {
-        return res.status(401).json({ success: false, error: e.message });
+        const err = unauthenticated(e?.message || 'Unauthorized');
+        logError({ requestId, endpoint: 'updateBrand', err });
+        return sendError(res, err, requestId);
       }
 
       let brand_id;
@@ -273,7 +287,9 @@ exports.updateBrand = onRequest(
             try {
               brandInfo = JSON.parse(fields.brandInfo);
             } catch (e) {
-              return res.status(400).json({ success: false, error: 'Invalid brandInfo JSON' });
+              const err = validationError({ brandInfo: 'invalid JSON' });
+              logError({ requestId, endpoint: 'updateBrand', err });
+              return sendError(res, err, requestId);
             }
           }
         } else {
@@ -283,14 +299,18 @@ exports.updateBrand = onRequest(
         }
 
         if (!brand_id || typeof brand_id !== 'string') {
-          return res.status(400).json({ success: false, error: 'Missing required field: brand_id' });
+          const err = validationError({ brand_id: 'required' });
+          logError({ requestId, endpoint: 'updateBrand', err });
+          return sendError(res, err, requestId);
         }
 
         const brandRef = db.collection('users').doc(user_id).collection('brands').doc(brand_id);
         const existing = await brandRef.get();
         if (!existing.exists) {
           if (logoFile) fs.unlink(logoFile.filepath, () => {});
-          return res.status(404).json({ success: false, error: 'Brand not found' });
+          const err = new AppError({ code: ErrorCodes.VALIDATION_ERROR, message: 'Brand not found', httpStatus: 404, retryable: false });
+          logError({ requestId, endpoint: 'updateBrand', err });
+          return sendError(res, err, requestId);
         }
 
         let logoUrl = undefined;
@@ -331,7 +351,8 @@ exports.updateBrand = onRequest(
               logoUrl = `https://firebasestorage.googleapis.com/v0/b/${bName}/o/${encodeURIComponent(destination)}?alt=media&token=${downloadToken}`;
             }
           } catch (uploadErr) {
-            throw new Error('Failed to upload logo: ' + uploadErr.message);
+            const err = storageError('Failed to upload logo', true, { reason: uploadErr?.message });
+            throw err;
           } finally {
             fs.unlink(logoFile.filepath, () => {});
           }
@@ -357,11 +378,10 @@ exports.updateBrand = onRequest(
         await brandRef.set(updatePayload, { merge: true });
         return res.status(200).json({ success: true, logoUrl });
       } catch (err) {
-        console.error('updateBrand error:', err);
         if (logoFile) fs.unlink(logoFile.filepath, () => {});
-        return res
-          .status(500)
-          .json({ success: false, error: 'Internal error updating brand', details: String(err?.message || err) });
+        const appErr = normalizeUnknownError(err);
+        logError({ requestId, uid: user_id, endpoint: 'updateBrand', err: appErr });
+        return sendError(res, appErr, requestId);
       }
     });
   },
@@ -375,6 +395,7 @@ exports.deleteBrand = onRequest(
     cors: true,
   },
   async (req, res) => {
+    const requestId = randomUUID();
     if (req.method === 'OPTIONS') {
       res.set('Access-Control-Allow-Origin', '*');
       res.set('Access-Control-Allow-Methods', 'DELETE, OPTIONS');
@@ -384,21 +405,27 @@ exports.deleteBrand = onRequest(
 
     return cors(req, res, async () => {
       if (req.method !== 'DELETE') {
-        return res.status(405).json({ success: false, error: 'Method not allowed. Use DELETE.' });
+        const err = new AppError({ code: ErrorCodes.INVALID_STATE, message: 'Method not allowed. Use DELETE.', httpStatus: 405, retryable: false });
+        logError({ requestId, endpoint: 'deleteBrand', err });
+        return sendError(res, err, requestId);
       }
       try {
         let user_id;
         try {
           user_id = await verifyAuth(req);
         } catch (e) {
-          return res.status(401).json({ success: false, error: e.message });
+          const err = unauthenticated(e?.message || 'Unauthorized');
+          logError({ requestId, endpoint: 'deleteBrand', err });
+          return sendError(res, err, requestId);
         }
 
         // Support both body (if client sends it) and query params (standard for DELETE)
         const brand_id = (req.body?.brand_id || req.query?.brand_id);
 
         if (!brand_id || typeof brand_id !== 'string') {
-          return res.status(400).json({ success: false, error: 'Missing required field: brand_id' });
+          const err = validationError({ brand_id: 'required' });
+          logError({ requestId, endpoint: 'deleteBrand', err });
+          return sendError(res, err, requestId);
         }
 
         const brandRef = db.collection('users').doc(user_id).collection('brands').doc(brand_id);
@@ -419,10 +446,9 @@ exports.deleteBrand = onRequest(
 
         return res.status(200).json({ success: true });
       } catch (err) {
-        console.error('deleteBrand error:', err);
-        return res
-          .status(500)
-          .json({ success: false, error: 'Internal error deleting brand', details: String(err?.message || err) });
+        const appErr = normalizeUnknownError(err);
+        logError({ requestId, endpoint: 'deleteBrand', err: appErr });
+        return sendError(res, appErr, requestId);
       }
     });
   },
@@ -436,6 +462,7 @@ exports.getBrands = onRequest(
     cors: true,
   },
   async (req, res) => {
+    const requestId = randomUUID();
     // CORS preflight
     if (req.method === 'OPTIONS') {
       res.set('Access-Control-Allow-Origin', '*');
@@ -446,7 +473,9 @@ exports.getBrands = onRequest(
 
     return cors(req, res, async () => {
       if (req.method !== 'GET') {
-        return res.status(405).json({ success: false, error: 'Method not allowed. Use GET.' });
+        const err = new AppError({ code: ErrorCodes.INVALID_STATE, message: 'Method not allowed. Use GET.', httpStatus: 405, retryable: false });
+        logError({ requestId, endpoint: 'getBrands', err });
+        return sendError(res, err, requestId);
       }
 
       try {
@@ -454,7 +483,9 @@ exports.getBrands = onRequest(
         try {
           user_id = await verifyAuth(req);
         } catch (e) {
-          return res.status(401).json({ success: false, error: e.message });
+          const err = unauthenticated(e?.message || 'Unauthorized');
+          logError({ requestId, endpoint: 'getBrands', err });
+          return sendError(res, err, requestId);
         }
 
         const brandsSnapshot = await db
@@ -474,10 +505,9 @@ exports.getBrands = onRequest(
 
         return res.status(200).json({ success: true, brands });
       } catch (err) {
-        console.error('getBrands error:', err);
-        return res
-          .status(500)
-          .json({ success: false, error: 'Internal error fetching brands', details: String(err?.message || err) });
+        const appErr = normalizeUnknownError(err);
+        logError({ requestId, uid: user_id, endpoint: 'getBrands', err: appErr });
+        return sendError(res, appErr, requestId);
       }
     });
   },
