@@ -87,11 +87,14 @@ async function decrementUsage(uid, usageType) {
 
     const freeCredits = userData.freeCredits || {};
 
+    const resolveUsedKey = (t) => t === 'generate' ? 'generationsUsed' : 'downloadsUsed';
+
     // Helper to get free remaining (handles legacy structure)
     const getFreeRemaining = (type) => {
        if (freeCredits[`${type}Limit`] !== undefined) {
           const limit = Number(freeCredits[`${type}Limit`]) || 0;
-          const used = Number(freeCredits[`${type}sUsed`]) || 0;
+          const usedKey = resolveUsedKey(type);
+          const used = Number(freeCredits[usedKey]) || 0;
           return Math.max(0, limit - used);
        }
        // Legacy
@@ -104,7 +107,7 @@ async function decrementUsage(uid, usageType) {
 
     const isSubActive = subscription.isActive === true;
     const limitKey = `${usageType}Limit`;
-    const usedKey = `${usageType}sUsed`; // downloadsUsed or generationsUsed
+    const usedKey = resolveUsedKey(usageType);
 
     const limit = Number(monthlyAllowance[limitKey]) || 0;
     const used = Number(monthlyAllowance[usedKey]) || 0;
@@ -130,7 +133,7 @@ async function decrementUsage(uid, usageType) {
        };
        
        if (freeCredits[`${usageType}Limit`] !== undefined) {
-         update[`freeCredits.${usageType}sUsed`] = FieldValue.increment(1);
+         update[`freeCredits.${usedKey}`] = FieldValue.increment(1);
        } else {
          // Migrate legacy to new structure on write
          // Assume legacy limit was 5 (since we just changed default to 3, but legacy users likely had 5)
@@ -155,7 +158,7 @@ async function decrementUsage(uid, usageType) {
          };
          
          // Mark current as used (increment used count)
-         newCredits[`${usageType}sUsed`] = newCredits[`${usageType}sUsed`] + 1;
+         newCredits[usedKey] = newCredits[usedKey] + 1;
 
          update.freeCredits = newCredits;
          // Clean legacy
