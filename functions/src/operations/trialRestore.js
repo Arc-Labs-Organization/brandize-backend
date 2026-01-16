@@ -36,7 +36,29 @@ const restoreTrialCredits = onCall(
     }
 
     const uid = request.auth.uid;
-    const restoreId = request.data?.restoreId;
+    let restoreId = request.data?.restoreId;
+
+    // Optional: Android Device ID to recover original restoreId if local storage was cleared
+    const deviceId = request.data?.deviceId;
+    if (deviceId && typeof deviceId === 'string') {
+       const deviceHash = sha256Hex(deviceId);
+       const deviceRef = db.collection('androidDeviceTrials').doc(deviceHash);
+       const deviceSnap = await deviceRef.get();
+       // If we find an existing record with a stored restoreId, USE IT.
+       // This bridges the gap when Android clears SecureStore on uninstall.
+       if (deviceSnap.exists) {
+           const data = deviceSnap.data() || {};
+           if (data.restoreId && typeof data.restoreId === 'string') {
+               logger.info('restoreTrialCredits:switched_to_persistent_restoreId', {
+                   uid,
+                   providedRestoreId: restoreId,
+                   persistentRestoreId: data.restoreId
+               });
+               restoreId = data.restoreId;
+           }
+       }
+    }
+
     if (!restoreId || typeof restoreId !== 'string' || restoreId.length < 12) {
       throw new HttpsError('invalid-argument', 'Missing or invalid restoreId.');
     }
@@ -95,33 +117,36 @@ const restoreTrialCredits = onCall(
       const fromData = fromSnap.data() || {};
       const fromFree = fromData.freeCredits || {};
 
-      let fromFreeGenerate = 0;
-      let fromFreeDownload = 0;
+      let sourceGenLimit = 0;
+      let sourceGenUsed = 0;
+      let sourceDlLimit = 0;
+      let sourceDlUsed = 0;
 
+      // 1. Extract raw usage from source
       if (
         fromFree.generateLimit !== undefined ||
         fromFree.downloadLimit !== undefined
       ) {
-        fromFreeGenerate = Math.max(
-          0,
-          (fromFree.generateLimit || 0) - (fromFree.generationsUsed || 0),
-        );
-        fromFreeDownload = Math.max(
-          0,
-          (fromFree.downloadLimit || 0) - (fromFree.downloadsUsed || 0),
-        );
+         sourceGenLimit = Number(fromFree.generateLimit) || 0;
+         sourceGenUsed = Number(fromFree.generationsUsed) || 0;
+         sourceDlLimit = Number(fromFree.downloadLimit) || 0;
+         sourceDlUsed = Number(fromFree.downloadsUsed) || 0;
       } else {
+        // Legacy fallback: treat 'generate'/'trialCreditsRemaining' as pure limit with 0 usage
         const hasFromFreeGenerate = Object.prototype.hasOwnProperty.call(
           fromFree,
           'generate',
         );
-        fromFreeGenerate = hasFromFreeGenerate
+        sourceGenLimit = hasFromFreeGenerate
           ? Number(fromFree.generate) || 0
           : Number(fromData.trialCreditsRemaining) || 0;
-        fromFreeDownload = Number(fromFree.download) || 0;
+        sourceDlLimit = Number(fromFree.download) || 0;
       }
 
-      if (fromFreeGenerate <= 0 && fromFreeDownload <= 0) {
+      const netGenRemaining = Math.max(0, sourceGenLimit - sourceGenUsed);
+      const netDlRemaining = Math.max(0, sourceDlLimit - sourceDlUsed);
+
+      if (netGenRemaining <= 0 && netDlRemaining <= 0) {
         tx.set(
           restoreRef,
           { lastSeenAt: FieldValue.serverTimestamp(), lastUid: uid },
@@ -131,30 +156,35 @@ const restoreTrialCredits = onCall(
       }
 
       const toData = toSnap.exists ? toSnap.data() || {} : {};
-
       const toFree = toData.freeCredits || {};
 
-      let newToFreeGenerate = 0;
-      let newToFreeDownload = 0;
-      let toUsedGen = 0;
-      let toUsedDl = 0;
+      // 2. Add to destination
+      let finalGenLimit = 0;
+      let finalGenUsed = 0;
+      let finalDlLimit = 0;
+      let finalDlUsed = 0;
 
       if (
         toFree.generateLimit !== undefined ||
         toFree.downloadLimit !== undefined
       ) {
-        newToFreeGenerate =
-          (toFree.generateLimit || 0) + Math.max(0, fromFreeGenerate);
-        newToFreeDownload =
-          (toFree.downloadLimit || 0) + Math.max(0, fromFreeDownload);
-        toUsedGen = toFree.generationsUsed || 0;
-        toUsedDl = toFree.downloadsUsed || 0;
+        // Destination already has new format
+        finalGenLimit = (Number(toFree.generateLimit) || 0) + sourceGenLimit;
+        finalGenUsed = (Number(toFree.generationsUsed) || 0) + sourceGenUsed;
+        
+        finalDlLimit = (Number(toFree.downloadLimit) || 0) + sourceDlLimit;
+        finalDlUsed = (Number(toFree.downloadsUsed) || 0) + sourceDlUsed;
       } else {
+        // Destination has legacy or no format
         const oldToGen = Number(toFree.generate) || 0;
         const oldToDl = Number(toFree.download) || 0;
+        
+        // Convert old 'generate' balance to limit+0 usage, then add source
+        finalGenLimit = oldToGen + sourceGenLimit;
+        finalGenUsed = sourceGenUsed;
 
-        newToFreeGenerate = oldToGen + Math.max(0, fromFreeGenerate);
-        newToFreeDownload = oldToDl + Math.max(0, fromFreeDownload);
+        finalDlLimit = oldToDl + sourceDlLimit;
+        finalDlUsed = sourceDlUsed;
       }
 
       // Remove from old uid
@@ -184,10 +214,10 @@ const restoreTrialCredits = onCall(
           trialProvider: 'restore',
           trialRestoredAt: FieldValue.serverTimestamp(),
           freeCredits: {
-            generateLimit: newToFreeGenerate,
-            downloadLimit: newToFreeDownload,
-            generationsUsed: toUsedGen,
-            downloadsUsed: toUsedDl,
+            generateLimit: finalGenLimit,
+            downloadLimit: finalDlLimit,
+            generationsUsed: finalGenUsed,
+            downloadsUsed: finalDlUsed,
             generate: FieldValue.delete(),
             download: FieldValue.delete(),
           },
@@ -208,8 +238,8 @@ const restoreTrialCredits = onCall(
       );
 
       return {
-        restored: fromFreeGenerate + fromFreeDownload,
-        restoredFreeCredits: { generate: fromFreeGenerate, download: fromFreeDownload },
+        restored: netGenRemaining + netDlRemaining,
+        restoredFreeCredits: { generate: netGenRemaining, download: netDlRemaining },
         fromUid,
       };
     });

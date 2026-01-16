@@ -67,6 +67,11 @@ const { verifyAppleDeviceTrial, resetAppleDeviceTrialDev } = require('./src/oper
 exports.verifyAppleDeviceTrial = verifyAppleDeviceTrial;
 exports.resetAppleDeviceTrialDev = resetAppleDeviceTrialDev;
 
+// Import and export Android Device Trial Verification
+const { verifyAndroidDeviceTrial, resetAndroidDeviceTrialDev } = require('./src/operations/androidDeviceTrial');
+exports.verifyAndroidDeviceTrial = verifyAndroidDeviceTrial;
+exports.resetAndroidDeviceTrialDev = resetAndroidDeviceTrialDev;
+
 // Import and export Trial Credits Restore (device-level restore id)
 const { restoreTrialCredits } = require('./src/operations/trialRestore');
 exports.restoreTrialCredits = restoreTrialCredits;
