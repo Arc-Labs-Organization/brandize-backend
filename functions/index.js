@@ -48,6 +48,10 @@ exports.generateChangeText = generateChangeText;
 const { generateReplaceImage } = require('./src/tools/replaceImage');
 exports.generateReplaceImage = generateReplaceImage;
 
+// Import and export Curation Operations (Home Page)
+const { refreshHomeTemplates } = require('./src/operations/curationOperations');
+exports.refreshHomeTemplates = refreshHomeTemplates;
+
 // Import and export Add Object Tool
 const { generateAddObject } = require('./src/tools/addObject');
 exports.generateAddObject = generateAddObject;
