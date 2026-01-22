@@ -134,6 +134,7 @@ function buildRebrandPrompt({ brand = {}, blueprint = {} }) {
 
   if (blueprint.aspectRatio) {
     parts.push(`Target aspect ratio: ${blueprint.aspectRatio}.`);
+    parts.push('IMPORTANT: If the target aspect ratio differs from the input image, DO NOT STRETCH or distort the original content. Instead, intelligently extend the background or crop to fit the new dimensions, keeping all text and logos natural and proportionate.');
   }
 
   parts.push(
