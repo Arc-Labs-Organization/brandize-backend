@@ -369,7 +369,7 @@ async function getRebrandFlows() {
         updated_texts: z.array(z.string().nullable()),
         additions: z.array(
           z.object({
-            type: z.enum(['phone', 'website', 'brand_name', 'brand_address']),
+            type: z.enum(['phone', 'website', 'brand_name', 'brand_address', 'brand_logo']),
             location: z.enum([
               'bottom-left',
               'bottom-mid',
@@ -453,7 +453,7 @@ async function getRebrandFlows() {
           updated_texts: z.array(z.string().nullable()),
           additions: z.array(
             z.object({
-              type: z.enum(['phone', 'website', 'brand_name', 'brand_address']),
+              type: z.enum(['phone', 'website', 'brand_name', 'brand_address', 'brand_logo']),
               location: z.enum([
                 'bottom-left',
                 'bottom-mid',

@@ -174,7 +174,7 @@ function buildSmartBlueprintPrompt({ brand = {}, updateFields = {} }) {
     '- **Fields that have a valid value,** must appear **at least once** in either **“updated_texts”** or **“additions.”**',
     '    - If you can replace original text with a context-appropriate and similarly sized version, do so in **“updated_texts.”**',
     '    - If no suitable replacement exists, add the content to “additions” with a strict object per entry containing: **type**, and **location**.',
-    '      - **type** must be one of: "phone" | "website" | "brand_name" | "brand_address".',
+    '      - **type** must be one of: "phone" | "website" | "brand_name" | "brand_address" | "brand_logo".',
     '      - **location** must be one of exactly: "bottom-right", "bottom-left", "bottom-mid", "top-left", "top-mid", "top-right". Do not use synonyms like "left-bottom" or "center-bottom".',
     '',
     '**Task:**',
