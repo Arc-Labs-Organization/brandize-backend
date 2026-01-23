@@ -61,10 +61,11 @@ const { generateVirtualModel } = require('./src/tools/virtualModel');
 exports.generateVirtualModel = generateVirtualModel;
 
 // Import and export User Operations
-const { getDownloadedImages, getCreatedImages, userInfo } = require('./src/operations/userOperations');
+const { getDownloadedImages, getCreatedImages, userInfo, cleanupOnAccountDeletion } = require('./src/operations/userOperations');
 exports.getDownloadedImages = getDownloadedImages;
 exports.getCreatedImages = getCreatedImages;
 exports.userInfo = userInfo;
+exports.cleanupOnAccountDeletion = cleanupOnAccountDeletion;
 
 // Import and export Apple Device Trial Verification
 const { verifyAppleDeviceTrial, resetAppleDeviceTrialDev } = require('./src/operations/deviceTrial');

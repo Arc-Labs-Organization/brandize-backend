@@ -1,6 +1,7 @@
 const admin = require('firebase-admin');
 const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 const { onRequest } = require('firebase-functions/v2/https');
+const functions = require('firebase-functions');
 const cors = require('cors')({ origin: true });
 const { verifyAuth } = require('../common/utils');
 const { SUBSCRIPTION_TIERS } = require('../common/subscriptionConfig');
@@ -491,4 +492,47 @@ const getCreatedImages = onRequest(
   },
 );
 
-module.exports = { ensureUserExists, decrementUsage, getDownloadedImages, getCreatedImages, userInfo };
+
+// Triggered when a user account is deleted via Firebase Auth
+const cleanupOnAccountDeletion = functions
+  .region('europe-west1')
+  .auth.user()
+  .onDelete(async (user) => {
+    const uid = user.uid;
+    console.log(`Deleting data for user ${uid}`);
+
+    // 1. Delete Firestore Data
+    try {
+      const userRef = db.collection('users').doc(uid);
+      await db.recursiveDelete(userRef);
+      console.log(`Successfully deleted Firestore user data for ${uid}`);
+    } catch (error) {
+      console.error(`Error deleting Firestore user data for ${uid}:`, error);
+    }
+
+    // 2. Delete Storage Data (Generated Images & Brand Logos)
+    // We do NOT touch 'images/common' or other shared paths.
+    try {
+      const bucket = admin.storage().bucket();
+      
+      // Delete generated images: images/generated/{uid}/...
+      await bucket.deleteFiles({ prefix: `images/generated/${uid}/` });
+      console.log(`Deleted generated images for ${uid}`);
+
+      // Delete brand logos: images/brand_logos/{uid}/...
+      await bucket.deleteFiles({ prefix: `images/brand_logos/${uid}/` });
+      console.log(`Deleted brand logos for ${uid}`);
+      
+    } catch (error) {
+      console.error(`Error deleting Storage files for ${uid}:`, error);
+    }
+});
+
+module.exports = { 
+  ensureUserExists, 
+  decrementUsage, 
+  getDownloadedImages, 
+  getCreatedImages, 
+  userInfo, 
+  cleanupOnAccountDeletion 
+};
