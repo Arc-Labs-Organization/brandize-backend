@@ -75,7 +75,11 @@ function buildReplaceImagePrompt({ description, aspectRatio }) {
   return parts.join('\n');
 }
 
-function buildRebrandPrompt({ brand = {}, blueprint = {} }) {
+function buildRebrandBlueprintPrompt({ llmResult, brand, userId = null, templateId = null, templateUrl = null, aspectRatio = null }) {
+  // ... (this function is not the one I want to edit, I want buildRebrandPrompt)
+}
+
+function buildRebrandPrompt({ brand, blueprint, originalAspectRatio, targetAspectRatio }) {
   const parts = [];
   parts.push('Update the design per the following blueprint suggestions.');
 
@@ -84,7 +88,7 @@ function buildRebrandPrompt({ brand = {}, blueprint = {} }) {
     Array.isArray(brand.colorPalette) &&
     brand.colorPalette.length > 0
   ) {
-    parts.push(`Use the following brand colors: ${brand.colorPalette.join(', ')}.`);
+    parts.push(`Apply the following brand colors: ${brand.colorPalette.join(', ')}.`);
   }
 
   const textOps = blueprint.text_updates || {};
@@ -132,14 +136,14 @@ function buildRebrandPrompt({ brand = {}, blueprint = {} }) {
     }
   }
 
-  if (blueprint.aspectRatio) {
-    parts.push(`Target aspect ratio: ${blueprint.aspectRatio}.`);
-    parts.push('IMPORTANT: If the target aspect ratio differs from the input image, DO NOT STRETCH or distort the original content. Instead, intelligently extend the background or crop to fit the new dimensions, keeping all text and logos natural and proportionate.');
+
+
+  // If we have both aspect ratios and they differ, add outpainting instructions
+  if (originalAspectRatio && targetAspectRatio && originalAspectRatio !== targetAspectRatio) {
+    parts.push(`Change aspect ratio to ${targetAspectRatio}, use outpainting and generative fill, seamless background extension, no distortion, preserve subject details.`);
   }
 
-  parts.push(
-    'GENERAL RULES: Preserve the overall layout, composition, and visual hierarchy of the original design. Do not remove or drastically move major visual elements unless explicitly requested.'
-  );
+
 
   return parts.join('\n');
 }

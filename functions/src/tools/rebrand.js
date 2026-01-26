@@ -126,13 +126,54 @@ async function getRebrandFlows() {
         logoUrlToFetch = brand.logoUrl;
       }
 
-      // Aspect Ratio
-      let aspectRatio = null;
-      if (bp.aspectRatio && allowedRatios.includes(bp.aspectRatio)) {
-        aspectRatio = bp.aspectRatio;
+      // 1. Calculate Input Aspect Ratio
+      let inputAspectRatio = null;
+      try {
+        const sharp = require('sharp');
+        const baseBuf = Buffer.from(croppedImageBase64, 'base64');
+        const meta = await sharp(baseBuf).metadata();
+        const w = meta.width || 0;
+        const h = meta.height || 0;
+        
+        if (w > 0 && h > 0) {
+          const ratio = w / h;
+          // Map allowed ratios to numerical values for comparison
+           const candidates = allowedRatios.map(r => {
+            const [rw, rh] = r.split(':').map(Number);
+            return { label: r, value: rw / rh };
+          });
+
+          let best = candidates[0];
+          let bestDiff = Math.abs(ratio - best.value);
+          
+          for (const c of candidates) {
+            const diff = Math.abs(ratio - c.value);
+            if (diff < bestDiff) {
+              best = c;
+              bestDiff = diff;
+            }
+          }
+          inputAspectRatio = best.label;
+          console.log(`Derived aspect ratio ${inputAspectRatio} from dimensions ${w}x${h}`);
+        }
+      } catch (e) {
+        console.warn('Failed to derive aspect ratio:', e);
       }
 
-      const fullPrompt = buildRebrandPrompt({ brand, blueprint: bp });
+      // 2. Determine Target/Final Aspect Ratio
+      let aspectRatio = null; // This will be the FINAL target used for generation
+      if (bp.aspectRatio && allowedRatios.includes(bp.aspectRatio)) {
+        aspectRatio = bp.aspectRatio;
+      } else {
+        aspectRatio = inputAspectRatio;
+      }
+
+      const fullPrompt = buildRebrandPrompt({ 
+        brand, 
+        blueprint: bp,
+        originalAspectRatio: inputAspectRatio,
+        targetAspectRatio: aspectRatio
+      });
 
       // Prepare Media
       const promptArray = [];
@@ -172,48 +213,99 @@ async function getRebrandFlows() {
       console.log(fullPrompt);
       console.log('--- GEMINI PROMPT END ---');
 
-      // Use Genkit to generate an image with Gemini 2.5 Flash Image
-      let media, rawResponse;
-      try {
-        ({ media, rawResponse } = await ai.generate({
-          model: googleAI.model('gemini-3-pro-image-preview'),
-          prompt: promptArray,
-          config: {
-            responseModalities: ['IMAGE'],
-            ...(aspectRatio ? { imageConfig: { aspectRatio } } : {}),
-          },
-          output: { format: 'media' },
-        }));
-      } catch (primaryErr) {
-        console.warn(
-          'Primary model failed, falling back to gemini-2.5-flash-image:',
-          primaryErr?.message || primaryErr,
-        );
-        ({ media, rawResponse } = await ai.generate({
-          model: googleAI.model('gemini-2.5-flash-image'),
-          prompt: promptArray,
-          config: {
-            responseModalities: ['IMAGE'],
-            ...(aspectRatio ? { imageConfig: { aspectRatio } } : {}),
-          },
-          output: { format: 'media' },
-        }));
+      // Use @google/genai SDK directly to avoid protocol mismatch errors with Genkit
+      // for the gemini-3-pro-image-preview model.
+      const { GoogleGenAI } = require("@google/genai");
+      const genaiClient = new GoogleGenAI({ apiKey: GOOGLE_API_KEY.value() });
+      
+      const contentsParts = [];
+
+      // Add text parts first as recommended by some Gemini documentation patterns
+      // (though interleaved is supported, consistent ordering helps)
+      for (const item of promptArray) {
+        if (item.text) {
+          contentsParts.push({ text: item.text });
+        }
       }
 
-      // Genkit may return media as an array or a single object. Normalize it.
-      const m = Array.isArray(media) ? media[0] : media;
-      if (!m?.url) {
-        console.error('generate: missing media in response', { media, rawResponse });
+      // Add media parts
+      for (const item of promptArray) {
+        if (item.media) {
+          // item.media.url is "data:<mime>;base64,<data>"
+          const matches = item.media.url.match(/^data:([^;]+);base64,(.+)$/);
+          if (matches) {
+            contentsParts.push({
+              inlineData: {
+                mimeType: matches[1],
+                data: matches[2] 
+              }
+            });
+          }
+        }
+      }
+
+      const imageConfig = {
+        aspectRatio: aspectRatio || '1:1',
+      };
+      
+      // Explicitly set 2K resolution if not provided, or map logic if needed.
+      // The user example had '2K'. We'll stick to aspectRatio for now unless we want to force resolution.
+      // Based on user snippet, let's include imageSize logic via aspectRatio mapping or default.
+      // The user prompt specifically showed "imageSize": "2K" in the successful example.
+      imageConfig.imageSize = '2K'; 
+
+      const response = await genaiClient.models.generateContent({
+        model: 'gemini-3-pro-image-preview',
+        contents: [{ parts: contentsParts }],
+        config: {
+          responseModalities: ['TEXT', 'IMAGE'],
+          imageConfig: imageConfig,
+        },
+      });
+
+      // Extract image data from GoogleGenAI response
+      let dataUrl = null;
+      const candidates = response.candidates || [];
+      const firstCandidate = candidates[0];
+      
+      // We will use the model version we requested since the SDK response structure varies
+      const modelVersion = 'gemini-3-pro-image-preview';
+      
+      if (firstCandidate && firstCandidate.content && firstCandidate.content.parts) {
+        for (const part of firstCandidate.content.parts) {
+           // We might get text parts (thoughts) and inlineData parts (image)
+           if (part.inlineData) {
+             const mime = part.inlineData.mimeType || 'image/png';
+             const b64 = part.inlineData.data;
+             dataUrl = `data:${mime};base64,${b64}`;
+           }
+           if (part.text) {
+             console.log('Gemini Thought:', part.text);
+           }
+        }
+      }
+
+      if (!dataUrl) {
+        console.error('generate: missing image in GoogleGenAI response', JSON.stringify(response, null, 2));
         throw new Error('Model did not return image media.');
       }
 
-      // m.url is a data URL: data:<mime>;base64,<data>
-      const dataUrl = m.url;
       const commaIdx = dataUrl.indexOf(',');
       const header = dataUrl.substring(0, commaIdx);
       const imageBase64 = dataUrl.substring(commaIdx + 1);
       const mimeTypeMatch = /data:(.*?);base64/.exec(header);
       const mimeType = (mimeTypeMatch && mimeTypeMatch[1]) || 'image/png';
+
+      // --- LOG RESOLUTION ---
+      try {
+        const sharp = require('sharp');
+        const buf = Buffer.from(imageBase64, 'base64');
+        const meta = await sharp(buf).metadata();
+        console.log(`GEMINI GENERATED RESOLUTION: ${meta.width}x${meta.height}`);
+      } catch (e) {
+        console.log('Failed to read dimensions:', e);
+      }
+      // ---------------------
 
       // Persist to Cloud Storage and Firestore
       const buffer = Buffer.from(imageBase64, 'base64');
@@ -323,7 +415,7 @@ async function getRebrandFlows() {
             mockupImageUrl: null,
             mimeType,
             downloadUrl,
-            modelVersion: rawResponse?.modelVersion || null,
+            modelVersion: modelVersion || null,
             size: buffer.length,
             thumbUrl: thumbUrl || null,
             thumbPath,
@@ -347,7 +439,7 @@ async function getRebrandFlows() {
       // No decrement here; credits are consumed at blueprint extraction step
       return {
         mimeType,
-        modelVersion: rawResponse?.modelVersion,
+        modelVersion: modelVersion,
         id,
         storagePath: imagePath,
         downloadUrl,
