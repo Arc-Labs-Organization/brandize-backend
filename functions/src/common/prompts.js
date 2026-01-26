@@ -174,7 +174,7 @@ function buildSmartBlueprintPrompt({ brand = {}, updateFields = {} }) {
     '',
     '- **Fields that are `null`** must **not** appear in either **“updated_texts”** or **“additions.”**',
     '    - If these fields exist in the original image, you should either **replace them with appropriate content** or **remove them entirely**.',
-    '    - If you choose to remove them, set their value to **`null`**.',
+    '    - If you choose to remove them, set their value to **`null`** in "updated_texts" array.',
     '- **Fields that have a valid value,** must appear **at least once** in either **“updated_texts”** or **“additions.”**',
     '    - If you can replace original text with a context-appropriate and similarly sized version, do so in **“updated_texts.”**',
     '    - If no suitable replacement exists, add the content to “additions” with a strict object per entry containing: **type**, and **location**.',
