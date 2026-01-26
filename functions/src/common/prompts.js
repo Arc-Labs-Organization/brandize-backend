@@ -112,7 +112,7 @@ function buildRebrandPrompt({ brand, blueprint, originalAspectRatio, targetAspec
   if (additions && typeof additions === 'object') {
     for (const [type, location] of Object.entries(additions)) {
       const lowerType = String(type).toLowerCase();
-      if (lowerType === 'brand_logo' || lowerType === 'logo') {
+      if ((lowerType === 'brand_logo' || lowerType === 'logo') && !blueprint.replace_logo) {
         parts.push(`Place the brand logo at ${location}.`);
         continue;
       }
