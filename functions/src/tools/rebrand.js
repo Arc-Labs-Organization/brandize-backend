@@ -491,7 +491,8 @@ async function getRebrandFlows() {
       const fieldValuesJson = JSON.stringify(fieldValues, null, 2);
       const promptText = buildSmartBlueprintPrompt({ brand, updateFields });
       
-      console.log('[generateSmartBlueprint] Prompt table:', fieldValuesJson);
+      // console.log('[generateSmartBlueprint] Prompt table:', fieldValuesJson);
+      console.log('[generateSmartBlueprint] Full Prompt Text:', promptText);
 
       // Prepare image media in Genkit prompt format
       const mediaParts = [];
