@@ -36,6 +36,19 @@ async function getReplaceImageFlows() {
 	if (flows) return flows;
 	const { ai, flow, z, googleAI } = await initGenkit();
 
+  const allowedRatios = [
+    '1:1',
+    '16:9',
+    '9:16',
+    '3:2',
+    '2:3',
+    '4:3',
+    '3:4',
+    '5:4',
+    '4:5',
+    '21:9',
+  ];
+
 	const generateReplaceImage = flow(
 		{
 			name: 'generateReplaceImage',
@@ -63,53 +76,130 @@ async function getReplaceImageFlows() {
 			newImageBase64,
 			newImageMimeType,
 			description,
-			aspectRatio,
+			aspectRatio: userAspectRatio,
 		}) => {
 			await ensureUserExists(uid);
+
+      // 1. Calculate Input Aspect Ratio
+      let inputAspectRatio = null;
+      try {
+        const sharp = require('sharp');
+        const baseBuf = Buffer.from(croppedImageBase64, 'base64');
+        const meta = await sharp(baseBuf).metadata();
+        const w = meta.width || 0;
+        const h = meta.height || 0;
+        
+        if (w > 0 && h > 0) {
+          const ratio = w / h;
+           const candidates = allowedRatios.map(r => {
+            const [rw, rh] = r.split(':').map(Number);
+            return { label: r, value: rw / rh };
+          });
+
+          let best = candidates[0];
+          let bestDiff = Math.abs(ratio - best.value);
+          
+          for (const c of candidates) {
+            const diff = Math.abs(ratio - c.value);
+            if (diff < bestDiff) {
+              best = c;
+              bestDiff = diff;
+            }
+          }
+          inputAspectRatio = best.label;
+          console.log(`Derived aspect ratio ${inputAspectRatio} from dimensions ${w}x${h}`);
+        }
+      } catch (e) {
+        console.warn('Failed to derive aspect ratio:', e);
+      }
+
+      // 2. Determine Target/Final Aspect Ratio
+      let aspectRatio = null;
+      if (userAspectRatio && allowedRatios.includes(userAspectRatio)) {
+        aspectRatio = userAspectRatio;
+      } else {
+        aspectRatio = inputAspectRatio;
+      }
 
 			const fullPrompt = buildReplaceImagePrompt({ description, aspectRatio });
 
 			const baseMime = croppedImageMimeType || 'image/png';
 			const newMime = newImageMimeType || 'image/png';
 
-			const promptArray = [
-				{
-					media: { url: `data:${baseMime};base64,${croppedImageBase64}`, contentType: baseMime },
-				},
-				{
-					media: { url: `data:${newMime};base64,${newImageBase64}`, contentType: newMime },
-				},
-				{ text: fullPrompt },
-			];
+      const promptArray = [];
+      promptArray.push({
+         media: {
+            url: `data:${baseMime};base64,${croppedImageBase64}`,
+            contentType: baseMime
+         }
+      });
+      promptArray.push({
+         media: {
+            url: `data:${newMime};base64,${newImageBase64}`,
+            contentType: newMime
+         }
+      });
+      promptArray.push({ text: fullPrompt });
 
-			let media, rawResponse;
-			try {
-				({ media, rawResponse } = await ai.generate({
-					model: googleAI.model('gemini-3-pro-image-preview'),
-					prompt: promptArray,
-					config: {
-						responseModalities: ['IMAGE'],
-						...(aspectRatio ? { imageConfig: { aspectRatio } } : {}),
-					},
-					output: { format: 'media' },
-				}));
-			} catch (primaryErr) {
-				({ media, rawResponse } = await ai.generate({
-					model: googleAI.model('gemini-2.5-flash-image'),
-					prompt: promptArray,
-					config: {
-						responseModalities: ['IMAGE'],
-						...(aspectRatio ? { imageConfig: { aspectRatio } } : {}),
-					},
-					output: { format: 'media' },
-				}));
-			}
+      // Use @google/genai SDK directly
+      const { GoogleGenAI } = require("@google/genai");
+      const genaiClient = new GoogleGenAI({ apiKey: GOOGLE_API_KEY.value() });
+      
+      const contentsParts = [];
+      for (const item of promptArray) {
+        if (item.text) {
+          contentsParts.push({ text: item.text });
+        }
+      }
+      for (const item of promptArray) {
+        if (item.media) {
+          const matches = item.media.url.match(/^data:([^;]+);base64,(.+)$/);
+          if (matches) {
+            contentsParts.push({
+              inlineData: {
+                mimeType: matches[1],
+                data: matches[2] 
+              }
+            });
+          }
+        }
+      }
 
-			const m = Array.isArray(media) ? media[0] : media;
-			if (!m?.url) throw new Error('Model did not return image media.');
+      const imageConfig = {
+        aspectRatio: aspectRatio || '1:1',
+        imageSize: '2K',
+      };
 
-			// Always export PNG to preserve alpha (avoid checkerboard artifacts)
-			const dataUrl = m.url;
+      const response = await genaiClient.models.generateContent({
+        model: 'gemini-3-pro-image-preview',
+        contents: [{ parts: contentsParts }],
+        config: {
+          responseModalities: ['TEXT', 'IMAGE'],
+          imageConfig: imageConfig,
+        },
+      });
+
+      // Extract image data
+      let dataUrl = null;
+      const candidates = response.candidates || [];
+      const firstCandidate = candidates[0];
+      const modelVersion = 'gemini-3-pro-image-preview';
+
+      if (firstCandidate && firstCandidate.content && firstCandidate.content.parts) {
+        for (const part of firstCandidate.content.parts) {
+           if (part.inlineData) {
+             const mime = part.inlineData.mimeType || 'image/png';
+             const b64 = part.inlineData.data;
+             dataUrl = `data:${mime};base64,${b64}`;
+           }
+        }
+      }
+
+      if (!dataUrl) {
+        console.error('generate: missing image in GoogleGenAI response', JSON.stringify(response, null, 2));
+        throw new Error('Model did not return image media.');
+      }
+
 			const commaIdx = dataUrl.indexOf(',');
 			const imageBase64 = dataUrl.substring(commaIdx + 1);
 			let buffer = Buffer.from(imageBase64, 'base64');
@@ -200,7 +290,7 @@ async function getReplaceImageFlows() {
 					mockupImageUrl: null,
 					mimeType: 'image/png',
 					downloadUrl,
-					modelVersion: rawResponse?.modelVersion || null,
+					modelVersion: modelVersion || null,
 					tool: 'replaceImage',
 					size: buffer.length,
 					thumbUrl: thumbUrl || null,

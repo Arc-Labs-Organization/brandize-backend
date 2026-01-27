@@ -35,6 +35,19 @@ async function getAddObjectFlows() {
 	if (flows) return flows;
 	const { ai, flow, z, googleAI } = await initGenkit();
 
+  const allowedRatios = [
+    '1:1',
+    '16:9',
+    '9:16',
+    '3:2',
+    '2:3',
+    '4:3',
+    '3:4',
+    '5:4',
+    '4:5',
+    '21:9',
+  ];
+
 	const generateAddObject = flow(
 		{
 			name: 'generateAddObject',
@@ -66,7 +79,7 @@ async function getAddObjectFlows() {
 			objectImageMimeType,
 			objectLocation,
 			objectBox,
-			aspectRatio,
+			aspectRatio: userAspectRatio,
 		}) => {
 			await ensureUserExists(uid);
 
@@ -199,73 +212,118 @@ async function getAddObjectFlows() {
 			}
 
 			// Path B: Gemini fallback with concise, high-signal prompt
+			
+      // 1. Calculate Input Aspect Ratio
+      let inputAspectRatio = null;
+      try {
+        const sharp = require('sharp');
+        const baseBuf = Buffer.from(croppedImageBase64, 'base64');
+        const meta = await sharp(baseBuf).metadata();
+        const w = meta.width || 0;
+        const h = meta.height || 0;
+        
+        if (w > 0 && h > 0) {
+          const ratio = w / h;
+           const candidates = allowedRatios.map(r => {
+            const [rw, rh] = r.split(':').map(Number);
+            return { label: r, value: rw / rh };
+          });
+
+          let best = candidates[0];
+          let bestDiff = Math.abs(ratio - best.value);
+          
+          for (const c of candidates) {
+            const diff = Math.abs(ratio - c.value);
+            if (diff < bestDiff) {
+              best = c;
+              bestDiff = diff;
+            }
+          }
+          inputAspectRatio = best.label;
+          console.log(`Derived aspect ratio ${inputAspectRatio} from dimensions ${w}x${h}`);
+        }
+      } catch (e) {
+        console.warn('Failed to derive aspect ratio:', e);
+      }
+
+      // 2. Determine Target/Final Aspect Ratio
+      let aspectRatio = null;
+      if (userAspectRatio && allowedRatios.includes(userAspectRatio)) {
+        aspectRatio = userAspectRatio;
+      } else {
+        aspectRatio = inputAspectRatio;
+      }
+
 			const fullPrompt = buildAddObjectPrompt({ objectLocation, aspectRatio });
 
 			const baseMime = croppedImageMimeType || 'image/png';
 			const objMime = objectImageMimeType || 'image/png';
 
-			const promptArray = [
-				{ media: { url: `data:${baseMime};base64,${croppedImageBase64}`, contentType: baseMime } },
-				{ media: { url: `data:${objMime};base64,${objectImageBase64}`, contentType: objMime } },
-				{ text: fullPrompt },
-			];
+      const promptArray = [{
+          media: { url: `data:${baseMime};base64,${croppedImageBase64}`, contentType: baseMime }
+        }, {
+          media: { url: `data:${objMime};base64,${objectImageBase64}`, contentType: objMime }
+        }, {
+          text: fullPrompt
+      }];
 
-			let media, rawResponse;
-			// Derive aspect ratio from base image if not provided
-			let derivedAspect = aspectRatio;
-			try {
-				if (!derivedAspect) {
-					const sharp = require('sharp');
-					const baseBufForAspect = Buffer.from(croppedImageBase64, 'base64');
-					const meta = await sharp(baseBufForAspect).metadata();
-					const w = meta.width || 0;
-					const h = meta.height || 0;
-					if (w > 0 && h > 0) {
-						const ratio = w / h;
-						const candidates = [
-							{ r: 1, label: '1:1' },
-							{ r: 16 / 9, label: '16:9' },
-							{ r: 4 / 3, label: '4:3' },
-							{ r: 3 / 2, label: '3:2' },
-							{ r: 9 / 16, label: '9:16' },
-						];
-						let best = candidates[0];
-						let bestDiff = Math.abs(ratio - best.r);
-						for (const c of candidates) {
-							const d = Math.abs(ratio - c.r);
-							if (d < bestDiff) { best = c; bestDiff = d; }
-						}
-						derivedAspect = best.label;
-						console.log('Canvas lock base size:', w, h, 'derived aspect:', derivedAspect);
-					}
-				}
-			} catch (_) {}
-			try {
-				({ media, rawResponse } = await ai.generate({
-					model: googleAI.model('gemini-3-pro-image-preview'),
-					prompt: promptArray,
-					config: {
-						responseModalities: ['IMAGE'],
-						...(derivedAspect ? { imageConfig: { aspectRatio: derivedAspect } } : {}),
-					},
-					output: { format: 'media' },
-				}));
-			} catch (_) {
-				({ media, rawResponse } = await ai.generate({
-					model: googleAI.model('gemini-2.5-flash-image'),
-					prompt: promptArray,
-					config: {
-						responseModalities: ['IMAGE'],
-						...(derivedAspect ? { imageConfig: { aspectRatio: derivedAspect } } : {}),
-					},
-					output: { format: 'media' },
-				}));
-			}
+      // Use @google/genai SDK directly
+      const { GoogleGenAI } = require("@google/genai");
+      const genaiClient = new GoogleGenAI({ apiKey: GOOGLE_API_KEY.value() });
+      
+      const contentsParts = [];
+      for (const item of promptArray) {
+        if (item.text) {
+          contentsParts.push({ text: item.text });
+        }
+      }
+      for (const item of promptArray) {
+        if (item.media) {
+          const matches = item.media.url.match(/^data:([^;]+);base64,(.+)$/);
+          if (matches) {
+            contentsParts.push({
+              inlineData: {
+                mimeType: matches[1],
+                data: matches[2] 
+              }
+            });
+          }
+        }
+      }
 
-			const m = Array.isArray(media) ? media[0] : media;
-			if (!m?.url) throw new Error('Model did not return image media.');
+      const imageConfig = {
+        aspectRatio: aspectRatio || '1:1',
+        imageSize: '2K',
+      };
 
-			const dataUrl = m.url;
+      const response = await genaiClient.models.generateContent({
+				model: 'gemini-3-pro-image-preview',
+        contents: [{ parts: contentsParts }],
+        config: {
+          responseModalities: ['TEXT', 'IMAGE'],
+          imageConfig: imageConfig,
+        },
+      });
+
+      // Extract image data
+      let dataUrl = null;
+      const candidates = response.candidates || [];
+      const firstCandidate = candidates[0];
+      const modelVersion = 'gemini-3-pro-image-preview';
+      let rawResponse = response;
+
+      if (firstCandidate && firstCandidate.content && firstCandidate.content.parts) {
+        for (const part of firstCandidate.content.parts) {
+           if (part.inlineData) {
+             const mime = part.inlineData.mimeType || 'image/png';
+             const b64 = part.inlineData.data;
+             dataUrl = `data:${mime};base64,${b64}`;
+           }
+        }
+      }
+
+			if (!dataUrl) throw new Error('Model did not return image media.');
+
 			const commaIdx = dataUrl.indexOf(',');
 			const imageBase64 = dataUrl.substring(commaIdx + 1);
 			let buffer = Buffer.from(imageBase64, 'base64');
@@ -354,7 +412,7 @@ async function getAddObjectFlows() {
 					mockupImageUrl: null,
 					mimeType: 'image/png',
 					downloadUrl,
-					modelVersion: rawResponse?.modelVersion || null,
+					modelVersion: modelVersion || null,
 					size: buffer.length,
 				});
 				await db.collection('users').doc(uid).collection('generated').doc(id).set({
