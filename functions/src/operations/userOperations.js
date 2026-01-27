@@ -177,6 +177,86 @@ async function decrementUsage(uid, usageType) {
   });
 }
 
+async function checkHasCredits(uid, usageType) {
+  if (!uid || typeof uid !== 'string') {
+    throw new Error('Invalid uid provided');
+  }
+  if (usageType !== 'download' && usageType !== 'generate') {
+    throw new Error("Invalid usage type. Must be 'download' or 'generate'");
+  }
+
+  const userRef = db.collection('users').doc(uid);
+  const userDoc = await userRef.get();
+
+  if (!userDoc.exists) {
+    // If user doesn't exist, they definitely don't have credits (or they are new/uninitialized)
+    // But typically ensureUserExists is called before. If not, we can fail.
+    // However, ensureUserExists initializes them with 0 credits anyway (except trial if any).
+    // Let's assume they have 0 if not found to suffice the check.
+    throw new AppError({
+      code: ErrorCodes.RESOURCE_EXHAUSTED,
+      message: 'User profile not initialized.',
+      httpStatus: 400,
+      retryable: false
+    });
+  }
+
+  const userData = userDoc.data();
+  
+  // 1. Check Monthly Allowance first
+  const subscription = userData.subscription || {};
+  const monthlyAllowance = userData.monthlyAllowance || { 
+    downloadLimit: 0, generateLimit: 0, downloadsUsed: 0, generationsUsed: 0 
+  };
+
+  const freeCredits = userData.freeCredits || {};
+
+  const resolveUsedKey = (t) => t === 'generate' ? 'generationsUsed' : 'downloadsUsed';
+
+  // Helper to get free remaining (handles legacy structure)
+  const getFreeRemaining = (type) => {
+     if (freeCredits[`${type}Limit`] !== undefined) {
+        const limit = Number(freeCredits[`${type}Limit`]) || 0;
+        const usedKey = resolveUsedKey(type);
+        const used = Number(freeCredits[usedKey]) || 0;
+        return Math.max(0, limit - used);
+     }
+     // Legacy
+     let val = Number(freeCredits[type]);
+     if (type === 'generate' && isNaN(val)) {
+        val = Number(userData.trialCreditsRemaining) || 0;
+     }
+     return Number.isFinite(val) ? val : 0;
+  };
+
+  const isSubActive = subscription.isActive === true;
+  const limitKey = `${usageType}Limit`;
+  const usedKey = resolveUsedKey(usageType);
+
+  const limit = Number(monthlyAllowance[limitKey]) || 0;
+  const used = Number(monthlyAllowance[usedKey]) || 0;
+  const monthlyRemaining = Math.max(0, limit - used);
+
+  if (isSubActive && monthlyRemaining > 0) {
+    return true;
+  }
+
+  // 2. Fallback to Free Credits
+  const actualFreeRemaining = getFreeRemaining(usageType);
+
+  if (actualFreeRemaining > 0) {
+     return true;
+  }
+
+  // 3. No credits left
+  throw new AppError({
+    code: ErrorCodes.RESOURCE_EXHAUSTED,
+    message: `You have no ${usageType} credits remaining. Please upgrade or wait for renewal.`,
+    httpStatus: 402,
+    retryable: false
+  });
+}
+
 /**
  * Get user info and remaining usage.
  * GET /userInfo
@@ -530,7 +610,8 @@ const cleanupOnAccountDeletion = functions
 
 module.exports = { 
   ensureUserExists, 
-  decrementUsage, 
+  decrementUsage,
+  checkHasCredits,
   getDownloadedImages, 
   getCreatedImages, 
   userInfo, 

@@ -4,7 +4,7 @@ const admin = require('firebase-admin');
 const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 const { randomUUID } = require('crypto');
 const { createMultipartParser, buildGeneratedImagePath, verifyAuth } = require('../common/utils');
-const { ensureUserExists, decrementUsage } = require('../operations/userOperations');
+const { ensureUserExists, decrementUsage, checkHasCredits } = require('../operations/userOperations');
 const { initGenkit, GOOGLE_API_KEY } = require('../common/genkit');
 const {
 	AppError,
@@ -357,6 +357,14 @@ exports.generateReplaceImage = onRequest(
 				const err = unauthenticated(e?.message || 'Unauthorized');
 				logError({ requestId, endpoint: 'generateReplaceImage', err });
 				return sendError(res, err, requestId);
+			}
+
+			try {
+				await ensureUserExists(uid);
+				await checkHasCredits(uid, 'generate');
+			} catch (e) {
+				logError({ requestId, uid, endpoint: 'generateReplaceImage', err: e });
+				return sendError(res, e, requestId);
 			}
 
 			try {

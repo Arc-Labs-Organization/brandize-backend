@@ -5,7 +5,7 @@ const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 const { randomUUID } = require('crypto');
 const { createMultipartParser, buildGeneratedImagePath, verifyAuth } = require('../common/utils');
 const { createAndUploadThumbnail, computeThumbPath } = require('../operations/thumbnailOperations');
-const { ensureUserExists, decrementUsage } = require('../operations/userOperations');
+const { ensureUserExists, decrementUsage, checkHasCredits } = require('../operations/userOperations');
 const { initGenkit, GOOGLE_API_KEY } = require('../common/genkit');
 const { buildAddObjectPrompt } = require('../common/prompts');
 const {
@@ -474,6 +474,14 @@ exports.generateAddObject = onRequest(
 					const err = unauthenticated(e?.message || 'Unauthorized');
 					logError({ requestId, endpoint: 'generateAddObject', err });
 					return sendError(res, err, requestId);
+			}
+
+			try {
+				await ensureUserExists(uid);
+				await checkHasCredits(uid, 'generate');
+			} catch (e) {
+				logError({ requestId, uid, endpoint: 'generateAddObject', err: e });
+				return sendError(res, e, requestId);
 			}
 
 			try {

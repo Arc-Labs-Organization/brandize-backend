@@ -5,7 +5,7 @@ const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 const { randomUUID } = require('crypto');
 const { createAndUploadThumbnail, computeThumbPath } = require('../operations/thumbnailOperations');
 const { createMultipartParser, buildGeneratedImagePath, verifyAuth } = require('../common/utils');
-const { ensureUserExists, decrementUsage } = require('../operations/userOperations');
+const { ensureUserExists, decrementUsage, checkHasCredits } = require('../operations/userOperations');
 const { initGenkit, GOOGLE_API_KEY } = require('../common/genkit');
 const { getExtractTextsPrompt, buildChangeTextPrompt } = require('../common/prompts');
 const {
@@ -301,6 +301,14 @@ exports.extractTexts = onRequest(
         logError({ requestId, endpoint: 'extractTexts', err });
         return sendError(res, err, requestId);
       }
+      
+      try {
+        await ensureUserExists(uid);
+        await checkHasCredits(uid, 'generate');
+      } catch (e) {
+        logError({ requestId, uid, endpoint: 'extractTexts', err: e });
+        return sendError(res, e, requestId);
+      }
 
       try {
         const { extractTexts } = await getChangeTextFlows();
@@ -376,11 +384,9 @@ exports.extractTexts = onRequest(
             croppedImageBase64: imageBuffer.toString('base64'),
             croppedImageMimeType: imageMimeType,
           });
-          // Decrement usage only after successful extraction
-          try {
-            await ensureUserExists(uid);
-            await decrementUsage(uid, 'generate');
-          } catch (_) {}
+          
+          await decrementUsage(uid, 'generate');
+
           return res.status(200).json(out);
         }
 
@@ -396,11 +402,9 @@ exports.extractTexts = onRequest(
           croppedImageBase64: base64,
           croppedImageMimeType: body.croppedImageMimeType,
         });
-        // Decrement usage only after successful extraction
-        try {
-          await ensureUserExists(uid);
-          await decrementUsage(uid, 'generate');
-        } catch (_) {}
+
+        await decrementUsage(uid, 'generate');
+
         res.status(200).json(out);
       } catch (err) {
         const appErr = normalizeUnknownError(err);
@@ -536,6 +540,7 @@ exports.generateChangeText = onRequest(
             croppedImageBase64: imageBuffer.toString('base64'),
             croppedImageMimeType: imageMimeType,
           });
+          
           return res.status(200).json(out);
         }
 
@@ -554,6 +559,7 @@ exports.generateChangeText = onRequest(
           croppedImageBase64: body.croppedImageBase64 || body.croppedImage,
           croppedImageMimeType: body.croppedImageMimeType,
         });
+
         res.status(200).json(out);
       } catch (err) {
         const appErr = normalizeUnknownError(err);

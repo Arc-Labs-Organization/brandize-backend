@@ -5,7 +5,7 @@ const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 const { randomUUID } = require('crypto');
 const { createAndUploadThumbnail, computeThumbPath } = require('../operations/thumbnailOperations');
 const { createMultipartParser, buildGeneratedImagePath, verifyAuth } = require('../common/utils');
-const { ensureUserExists, decrementUsage } = require('../operations/userOperations');
+const { ensureUserExists, decrementUsage, checkHasCredits } = require('../operations/userOperations');
 const { initGenkit, GOOGLE_API_KEY } = require('../common/genkit');
 const { buildRebrandPrompt, buildSmartBlueprintPrompt } = require('../common/prompts');
 const {
@@ -782,6 +782,14 @@ exports.generateSmartBlueprint = onRequest(
         return sendError(res, err, requestId);
       }
 
+      try {
+        await ensureUserExists(user_id);
+        await checkHasCredits(user_id, 'generate');
+      } catch (e) {
+        logError({ requestId, uid: user_id, endpoint: 'generateSmartBlueprint', err: e });
+        return sendError(res, e, requestId);
+      }
+
       // Check for multipart/form-data
       if (!req.headers['content-type'] || !req.headers['content-type'].includes('multipart/form-data')) {
         const err = validationError({ 'content-type': 'must be multipart/form-data' });
@@ -895,10 +903,7 @@ exports.generateSmartBlueprint = onRequest(
         const llmResult = await generateSmartBlueprintFlow({ brand: brandData, imageBase64, updateFields: parsedUpdateFields });
 
         // Decrement usage only after successful extraction (bill as a generation credit)
-        try {
-          await ensureUserExists(user_id);
-          await decrementUsage(user_id, 'generate');
-        } catch (_) {}
+        await decrementUsage(user_id, 'generate');
 
         return res.status(200).json(llmResult);
       } catch (err) {
