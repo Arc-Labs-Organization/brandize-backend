@@ -50,8 +50,8 @@ function sha256Hex(input) {
 // Params (non-secret). These replace functions.config() (deprecated March 2026).
 const APPLE_KEY_ID = defineSecret('APPLE_KEY_ID');
 const APPLE_TEAM_ID = defineSecret('APPLE_TEAM_ID');
-// Hardcoded to development endpoint for now.
-const APPLE_DEVICECHECK_BASE_URL = 'https://api.development.devicecheck.apple.com';
+// Use the production URL for the App Store release.
+const APPLE_DEVICECHECK_BASE_URL = 'https://api.devicecheck.apple.com';
 
 //Use the base URL shown in the example curl commands—that is, https://api.development.devicecheck.apple.com—only for testing during development. 
 // When you’re ready to transition to a production environment, you must use the production base URL https://api.devicecheck.apple.com. 
