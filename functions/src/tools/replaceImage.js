@@ -121,7 +121,7 @@ async function getReplaceImageFlows() {
         aspectRatio = inputAspectRatio;
       }
 
-			const fullPrompt = buildReplaceImagePrompt({ description, aspectRatio });
+			const fullPrompt = buildReplaceImagePrompt({ description, originalAspectRatio: inputAspectRatio, targetAspectRatio: aspectRatio });
 
 			const baseMime = croppedImageMimeType || 'image/png';
 			const newMime = newImageMimeType || 'image/png';

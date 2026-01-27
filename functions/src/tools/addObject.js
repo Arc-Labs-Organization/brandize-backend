@@ -254,7 +254,7 @@ async function getAddObjectFlows() {
         aspectRatio = inputAspectRatio;
       }
 
-			const fullPrompt = buildAddObjectPrompt({ objectLocation, aspectRatio });
+			const fullPrompt = buildAddObjectPrompt({ objectLocation, originalAspectRatio: inputAspectRatio, targetAspectRatio: aspectRatio });
 
 			const baseMime = croppedImageMimeType || 'image/png';
 			const objMime = objectImageMimeType || 'image/png';

@@ -31,26 +31,37 @@ function buildChangeTextPrompt({ textOps = {}, aspectRatio = null }) {
   return parts.join('\n');
 }
 
-function buildAddObjectPrompt({ objectLocation, aspectRatio }) {
+function buildAddObjectPrompt({ objectLocation, originalAspectRatio, targetAspectRatio }) {
   const parts = [];
-  parts.push('Output size: exactly match Image 1 (same width and height).');
+  if (!targetAspectRatio || !originalAspectRatio || targetAspectRatio === originalAspectRatio) {
+    parts.push('Output size: exactly match Image 1 (same width and height).');
+  }
   parts.push('Add the object from Image 2 into Image 1.');
   parts.push(`Target location: ${objectLocation}.`);
   parts.push('Edit only the target region; preserve everything else.');
   parts.push('Match lighting, color balance, and shadows.');
-  if (aspectRatio) parts.push(`Target aspect ratio: ${aspectRatio}.`);
+
+  if (originalAspectRatio && targetAspectRatio && originalAspectRatio !== targetAspectRatio) {
+    parts.push(`Change aspect ratio to ${targetAspectRatio}, use outpainting and generative fill, seamless background extension, no distortion, preserve subject details.`);
+  }
+
   return parts.join('\n');
 }
 
-function buildReplaceImagePrompt({ description, aspectRatio }) {
+function buildReplaceImagePrompt({ description, originalAspectRatio, targetAspectRatio }) {
   const parts = [];
   parts.push('You are an expert image editor.');
   parts.push(
     'Task: In image #1 (the template crop), replace the described object/subject using image #2 (the replacement source).'
   );
-  parts.push(
-    'Target region: the ENTIRE bounds of image #1. The output must match image #1 canvas exactly (no padding, borders, blank areas, or resizing the canvas).'
-  );
+  if (!targetAspectRatio || !originalAspectRatio || targetAspectRatio === originalAspectRatio) {
+    parts.push(
+      'Target region: the ENTIRE bounds of image #1. The output must match image #1 canvas exactly (no padding, borders, blank areas, or resizing the canvas).'
+    );
+  } else {
+    parts.push('Target region: the ENTIRE bounds of image #1.');
+  }
+
   parts.push('Rules (follow strictly):');
   parts.push(
     '1) Preserve everything in image #1 except the target object/subject. Do NOT change layout, background graphics, logos, or any text.'
@@ -68,10 +79,11 @@ function buildReplaceImagePrompt({ description, aspectRatio }) {
     '5) No extras: no stickers/watermarks, no duplicated subjects, no extra objects, no heavy filters, no border artifacts.'
   );
   if (description) parts.push(`Replacement description: ${String(description).trim()}`);
-  if (aspectRatio)
-    parts.push(
-      `Output aspect ratio hint (also enforced via config): ${String(aspectRatio).trim()}`
-    );
+
+  if (originalAspectRatio && targetAspectRatio && originalAspectRatio !== targetAspectRatio) {
+    parts.push(`Change aspect ratio to ${targetAspectRatio}, use outpainting and generative fill, seamless background extension, no distortion, preserve subject details.`);
+  }
+
   return parts.join('\n');
 }
 
