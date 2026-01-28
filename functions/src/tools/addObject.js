@@ -181,7 +181,7 @@ async function getAddObjectFlows() {
 						style: null,
 						aspectRatio: `${canvasW}:${canvasH}`,
 						mockupImageUrl: null,
-						mimeType: 'image/png',
+						mimeType,
 						downloadUrl,
 						modelVersion: null,
 						size: outBuffer.length,
@@ -325,19 +325,26 @@ async function getAddObjectFlows() {
 			if (!dataUrl) throw new Error('Model did not return image media.');
 
 			const commaIdx = dataUrl.indexOf(',');
+      const header = dataUrl.substring(0, commaIdx);
 			const imageBase64 = dataUrl.substring(commaIdx + 1);
-			let buffer = Buffer.from(imageBase64, 'base64');
-			let mimeType = 'image/png';
+
+      const mimeTypeMatch = /data:(.*?);base64/.exec(header);
+      const mimeType = (mimeTypeMatch && mimeTypeMatch[1]) || 'image/png';
+
+			const buffer = Buffer.from(imageBase64, 'base64');
+      const ext = ((mime) => {
+        if (mime === 'image/png') return 'png';
+        if (mime === 'image/jpeg' || mime === 'image/jpg') return 'jpg';
+        if (mime === 'image/webp') return 'webp';
+        return 'png';
+      })(mimeType);
+
+      // Log dimensions for debugging only, no re-encoding
 			try {
 				const sharp = require('sharp');
 				const outMeta = await sharp(buffer).metadata();
 				console.log('Model output size:', outMeta.width, outMeta.height);
-				buffer = await sharp(buffer, { unlimited: true }).png().toBuffer();
-				mimeType = 'image/png';
-			} catch (_) {
-				// keep buffer as-is; still store as PNG
-			}
-			const ext = 'png';
+			} catch (_) { }
 
 			const id = randomUUID();
 			const imagePath = buildGeneratedImagePath(uid, id, ext);

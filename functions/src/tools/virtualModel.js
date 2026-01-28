@@ -144,25 +144,31 @@ async function getVirtualModelFlows() {
 			// Convert to PNG and enforce canvas lock to the model image size
 			const dataUrl = m.url;
 			const commaIdx = dataUrl.indexOf(',');
+      const header = dataUrl.substring(0, commaIdx);
 			const imageBase64 = dataUrl.substring(commaIdx + 1);
+
+      const mimeTypeMatch = /data:(.*?);base64/.exec(header);
+      let mimeType = (mimeTypeMatch && mimeTypeMatch[1]) || 'image/png';
+
 			let buffer = Buffer.from(imageBase64, 'base64');
-			let mimeType = 'image/png';
 			try {
-				const sharp = require('sharp');
-				const resized = await sharp(buffer, { unlimited: true })
-					.png()
-					.toBuffer();
+        // Enforce canvas lock only if we have original dimensions
 				if (modelWidth && modelHeight) {
-					buffer = await sharp(resized, { unlimited: true })
+          const sharp = require('sharp');
+					buffer = await sharp(buffer, { unlimited: true })
 						.resize(modelWidth, modelHeight, { fit: 'cover', position: 'centre' })
 						.png()
 						.toBuffer();
-				} else {
-					buffer = resized;
+          mimeType = 'image/png';
 				}
-				mimeType = 'image/png';
 			} catch (_) {}
-			const ext = 'png';
+      
+      const ext = ((mime) => {
+        if (mime === 'image/png') return 'png';
+        if (mime === 'image/jpeg' || mime === 'image/jpg') return 'jpg';
+        if (mime === 'image/webp') return 'webp';
+        return 'png';
+      })(mimeType);
 
 			const id = randomUUID();
 			const imagePath = buildGeneratedImagePath(uid, id, ext);
@@ -235,7 +241,7 @@ async function getVirtualModelFlows() {
 					style: null,
 					aspectRatio: safeAspect || null,
 					mockupImageUrl: null,
-					mimeType: 'image/png',
+					mimeType: mimeType,
 					downloadUrl,
 					modelVersion: rawResponse?.modelVersion || null,
 					size: buffer.length,

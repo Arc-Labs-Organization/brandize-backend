@@ -201,18 +201,19 @@ async function getReplaceImageFlows() {
       }
 
 			const commaIdx = dataUrl.indexOf(',');
+      const header = dataUrl.substring(0, commaIdx);
 			const imageBase64 = dataUrl.substring(commaIdx + 1);
-			let buffer = Buffer.from(imageBase64, 'base64');
-			let mimeType = 'image/png';
-			try {
-				// If model returned JPEG/WebP, re-encode to PNG to keep RGBA
-				const sharp = require('sharp');
-				buffer = await sharp(buffer, { unlimited: true }).png().toBuffer();
-				mimeType = 'image/png';
-			} catch (_) {
-				// Fallback: use raw buffer; still mark as PNG when saving
-			}
-			const ext = 'png';
+
+      const mimeTypeMatch = /data:(.*?);base64/.exec(header);
+      const mimeType = (mimeTypeMatch && mimeTypeMatch[1]) || 'image/png';
+
+			const buffer = Buffer.from(imageBase64, 'base64');
+      const ext = ((mime) => {
+        if (mime === 'image/png') return 'png';
+        if (mime === 'image/jpeg' || mime === 'image/jpg') return 'jpg';
+        if (mime === 'image/webp') return 'webp';
+        return 'png';
+      })(mimeType);
 
 			const id = randomUUID();
 			const imagePath = buildGeneratedImagePath(uid, id, ext);
@@ -232,7 +233,7 @@ async function getReplaceImageFlows() {
 					downloadToken = randomUUID();
 					await file.save(buffer, {
 						resumable: false,
-						contentType: 'image/png',
+						contentType: mimeType,
 						metadata: {
 							cacheControl: 'public, max-age=31536000',
 							metadata: { firebaseStorageDownloadTokens: downloadToken },
@@ -288,7 +289,7 @@ async function getReplaceImageFlows() {
 					style: null,
 					aspectRatio: aspectRatio || null,
 					mockupImageUrl: null,
-					mimeType: 'image/png',
+					mimeType: mimeType,
 					downloadUrl,
 					modelVersion: modelVersion || null,
 					tool: 'replaceImage',
