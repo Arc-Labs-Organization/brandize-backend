@@ -204,6 +204,34 @@ exports.freepikSearch = onRequest(
         // 		console.warn("onlyFree heuristic filtering error:", e?.message || e);
         // 	}
         // }
+
+        // Sanitize URLs: Upgrade http:// to https:// because mobile clients (iOS/Android) 
+        // block cleartext traffic by default.
+        const deepForceHttps = (obj) => {
+          if (typeof obj === 'string') {
+            if (obj.startsWith('http://')) {
+              return obj.replace('http://', 'https://');
+            }
+            return obj;
+          }
+          if (Array.isArray(obj)) {
+            return obj.map(deepForceHttps);
+          }
+          if (obj && typeof obj === 'object') {
+            for (const key in obj) {
+              obj[key] = deepForceHttps(obj[key]);
+            }
+            return obj;
+          }
+          return obj;
+        };
+
+        try {
+          json = deepForceHttps(json);
+        } catch (httpsErr) {
+          console.warn('Error enforcing HTTPS on Freepik response:', httpsErr);
+        }
+
         // Here we pass through the original payload so you can map on the client.
         return res.status(200).json(json);
       } catch (err) {
