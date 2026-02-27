@@ -126,9 +126,10 @@ async function getVirtualModelFlows() {
 					},
 					output: { format: 'media' },
 				}));
-			} catch (_) {
+			} catch (primaryErr) {
+				console.warn('gemini-3-pro-image-preview failed, falling back to gemini-3.1-flash-image-preview:', primaryErr?.message || primaryErr);
 				({ media, rawResponse } = await ai.generate({
-					model: googleAI.model('gemini-2.5-flash-image'),
+					model: googleAI.model('gemini-3.1-flash-image-preview'),
 					prompt: promptArray,
 					config: {
 						responseModalities: ['IMAGE'],

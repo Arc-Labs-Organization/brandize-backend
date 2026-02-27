@@ -254,22 +254,41 @@ async function getRebrandFlows() {
       // The user prompt specifically showed "imageSize": "2K" in the successful example.
       imageConfig.imageSize = '2K'; 
 
-      const response = await genaiClient.models.generateContent({
-        model: 'gemini-3-pro-image-preview',
-        contents: [{ parts: contentsParts }],
-        config: {
-          responseModalities: ['TEXT', 'IMAGE'],
-          imageConfig: imageConfig,
-        },
-      });
+      const modelsToTry = ['gemini-3-pro-image-preview', 'gemini-3.1-flash-image-preview'];
+      let response = null;
+      let usedModel = null;
+
+      for (const modelName of modelsToTry) {
+        try {
+          console.log(`Attempting image generation with model: ${modelName}`);
+          response = await genaiClient.models.generateContent({
+            model: modelName,
+            contents: [{ parts: contentsParts }],
+            config: {
+              responseModalities: ['TEXT', 'IMAGE'],
+              imageConfig: imageConfig,
+            },
+          });
+          usedModel = modelName;
+          console.log(`Successfully generated with model: ${modelName}`);
+          break;
+        } catch (modelErr) {
+          console.warn(`Model ${modelName} failed:`, modelErr?.message || modelErr);
+          if (modelName === modelsToTry[modelsToTry.length - 1]) {
+            // Last model in the list — re-throw
+            throw modelErr;
+          }
+          console.log(`Falling back to next model...`);
+        }
+      }
 
       // Extract image data from GoogleGenAI response
       let dataUrl = null;
       const candidates = response.candidates || [];
       const firstCandidate = candidates[0];
       
-      // We will use the model version we requested since the SDK response structure varies
-      const modelVersion = 'gemini-3-pro-image-preview';
+      // Track which model actually produced the result
+      const modelVersion = usedModel;
       
       if (firstCandidate && firstCandidate.content && firstCandidate.content.parts) {
         for (const part of firstCandidate.content.parts) {
