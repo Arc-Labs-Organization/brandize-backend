@@ -109,6 +109,18 @@ exports.verifyAndroidDeviceTrial = onCall({
 
       if (!userSnap.exists) {
            tx.set(userRef, {
+               subscription: {
+                   status: 'free',
+                   isActive: false,
+                   currentPeriodEnd: null,
+                   provider: null,
+               },
+               monthlyAllowance: {
+                   downloadLimit: 0,
+                   generateLimit: 0,
+                   downloadsUsed: 0,
+                   generationsUsed: 0,
+               },
                hasClaimedTrial: true,
                trialClaimedAt: FieldValue.serverTimestamp(),
                freeCredits: {
@@ -117,7 +129,9 @@ exports.verifyAndroidDeviceTrial = onCall({
                    generationsUsed: 0,
                    downloadsUsed: 0
                },
+               trialCreditsRemaining: 0,
                createdAt: FieldValue.serverTimestamp(),
+               lastUsedAt: FieldValue.serverTimestamp(),
                platform: 'android'
            });
       } else {

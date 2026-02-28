@@ -53,10 +53,32 @@ async function ensureUserExists(uid) {
       lastUsedAt: FieldValue.serverTimestamp(),
     });
   } else {
-    // Update lastUsedAt timestamp
-    await userRef.update({
-      lastUsedAt: FieldValue.serverTimestamp(),
-    });
+    // Backfill missing top-level fields (e.g. user created by trial claim before ensureUserExists ran)
+    const data = userDoc.data() || {};
+    const backfill = {};
+
+    if (!data.subscription) {
+      backfill.subscription = {
+        status: 'free',
+        isActive: false,
+        currentPeriodEnd: null,
+        provider: null,
+      };
+    }
+    if (!data.monthlyAllowance) {
+      backfill.monthlyAllowance = {
+        downloadLimit: 0,
+        generateLimit: 0,
+        downloadsUsed: 0,
+        generationsUsed: 0,
+      };
+    }
+    if (data.trialCreditsRemaining === undefined) {
+      backfill.trialCreditsRemaining = 0;
+    }
+
+    backfill.lastUsedAt = FieldValue.serverTimestamp();
+    await userRef.update(backfill);
   }
 }
 
